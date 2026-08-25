@@ -17,7 +17,20 @@
  *
  * The only fetch still attempted directly is a Liquipedia page - it is much
  * faster when the cookie happens to travel, and it falls back to the tab the
- * moment a challenge comes back.
+ * moment anything at all comes back that is not the article. A Liquipedia read
+ * therefore escalates through three rungs, stopping at the first that returns
+ * a real page:
+ *
+ *   worker fetch    fastest, works only when the clearance cookie travels
+ *   tab fetch       same-origin, from inside the tab, with its cookies
+ *   tab navigation  the tab simply goes to the page, exactly as the user would
+ *
+ * The escalation is deliberately blind to *why* the previous rung failed,
+ * because the failure modes do not look alike: a Cloudflare challenge is a 403
+ * with a captcha in it, a school or office web filter is often a 200 serving
+ * its own "blocked" page, and a DNS blackhole is no response at all - the fetch
+ * simply throws. Each of those used to end the read; each of them now drops to
+ * the next rung, and the reason it did is recorded in the run log.
  */
 
 var DIAGNOSTIC_HEADERS = ['server', 'retry-after', 'cf-ray', 'cf-mitigated', 'x-cache', 'content-type'];
@@ -26,6 +39,28 @@ var SEARCH_SPACING_MS = 1200;    // don't machine-gun the search engine
 function isChallenge(status, text) {
   if (status !== 403 && status !== 429 && status !== 503) return false;
   return /verify you are human|are you a robot|captcha|checking your browser|javascript enabled/i.test(text || '');
+}
+
+function isLiquipediaUrl(url) {
+  return /^https:\/\/liquipedia\.net\//.test(url || '');
+}
+
+/*
+ * Did that response actually contain the article?
+ *
+ * A blocked page does not have to arrive with an error status: web filters,
+ * captive portals and transparent proxies all answer 200 with their own HTML,
+ * and that HTML parses perfectly well - into a thread with an empty roster in
+ * it. So the body is checked rather than the status, and checked for what a
+ * Liquipedia page *has* rather than for what a block page says: every article
+ * is MediaWiki output, while a blocklist of filter vendors' wording would both
+ * miss the next filter and fire on an article that merely quotes one.
+ */
+var MEDIAWIKI_MARKERS = /mw-parser-output|firstHeading|mw-body-content|wgPageName/;
+
+function isRealPage(url, text) {
+  if (!text) return false;
+  return isLiquipediaUrl(url) ? MEDIAWIKI_MARKERS.test(text) : true;
 }
 
 function excerptOf(text) {
@@ -207,37 +242,85 @@ function searchInTab(kind, name) {
 }
 
 // Read a Liquipedia page. Tries a plain credentialed fetch first because it is
-// far quicker, and drops to the tab when the human check bites.
+// far quicker, and drops to the tab whenever that does not come back with the
+// article - a challenge, a filter's block page, or no response at all.
 function fetchPage(url) {
   var t0 = Date.now();
   return fetch(url, { credentials: 'include' })
     .then(function (r) {
-      return r.text().then(function (text) {
-        if (r.ok) {
-          return { ok: true, status: r.status, url: r.url, text: text,
-                   bytes: text.length, ms: Date.now() - t0, via: 'worker',
-                   contentType: r.headers.get('content-type') || '' };
-        }
-        var headers = {};
-        DIAGNOSTIC_HEADERS.forEach(function (h) {
-          var v = r.headers.get(h);
-          if (v) headers[h] = v;
-        });
-        var failed = {
-          ok: false, status: r.status, statusText: r.statusText || '', url: r.url,
-          bytes: text.length, ms: Date.now() - t0, via: 'worker', headers: headers,
-          excerpt: excerptOf(text), challenge: isChallenge(r.status, text)
-        };
-        if (!/^https:\/\/liquipedia\.net\//.test(url)) return failed;
-        return fetchPageInTab(url).then(function (viaTab) {
-          viaTab.retriedAfter = { status: failed.status, bytes: failed.bytes,
-                                  challenge: failed.challenge };
-          return viaTab;
-        });
-      });
+      return r.text().then(function (text) { return { response: r, text: text }; });
     })
-    .catch(function (e) {
-      return { ok: false, status: 0, url: url, error: String(e.message || e), ms: Date.now() - t0 };
+    .then(function (got) {
+      var r = got.response, text = got.text;
+      if (r.ok && isRealPage(url, text)) {
+        return { ok: true, status: r.status, url: r.url, text: text,
+                 bytes: text.length, ms: Date.now() - t0, via: 'worker',
+                 contentType: r.headers.get('content-type') || '' };
+      }
+      var headers = {};
+      DIAGNOSTIC_HEADERS.forEach(function (h) {
+        var v = r.headers.get(h);
+        if (v) headers[h] = v;
+      });
+      return retryInTab(url, {
+        ok: false, status: r.status, statusText: r.statusText || '', url: r.url,
+        bytes: text.length, ms: Date.now() - t0, via: 'worker', headers: headers,
+        excerpt: excerptOf(text), challenge: isChallenge(r.status, text),
+        // a 200 that was not the page asked for: something answered in its place
+        intercepted: r.ok || undefined
+      });
+    }, function (e) {
+      // No response at all - blocked at the network layer, offline, or DNS
+      // sinkholed. The tab still gets its own try: whatever refused the worker
+      // may well let a normal navigation through.
+      return retryInTab(url, {
+        ok: false, status: 0, url: url, via: 'worker', ms: Date.now() - t0,
+        error: String((e && e.message) || e), networkError: true
+      });
+    });
+}
+
+// The tab is only worth waking for a Liquipedia page; anything else is reported
+// as it failed.
+function retryInTab(url, failed) {
+  if (!isLiquipediaUrl(url)) return Promise.resolve(failed);
+  return fetchPageInTab(url).then(function (viaTab) {
+    viaTab.retriedAfter = {
+      status: failed.status, bytes: failed.bytes, challenge: failed.challenge,
+      intercepted: failed.intercepted, networkError: failed.networkError,
+      error: failed.error, excerpt: failed.excerpt
+    };
+    return viaTab;
+  });
+}
+
+// A fetch from inside the tab. Quicker than a navigation and the cookie is sent
+// without question, but it is still a fetch, and a filter that blocks those on
+// sight blocks this one too - so its answer is checked like any other.
+function fetchInTab(tabId, url, t0) {
+  return runInTab(tabId, sameOriginFetch, [url]).then(function (r) {
+    var ok = r.ok && isRealPage(url, r.text);
+    return { ok: ok, status: r.status, url: r.url, text: r.text,
+             bytes: (r.text || '').length, ms: Date.now() - t0, via: 'tab-fetch',
+             excerpt: ok ? undefined : excerptOf(r.text), error: r.error,
+             intercepted: (r.ok && !ok) || undefined };
+  });
+}
+
+// The last rung: the tab goes to the page itself. Nothing here is a fetch, an
+// XHR or an extension - it is a browser loading a URL, which is the request
+// every one of these defences is built to let through.
+function navigateInTab(tabId, url, t0) {
+  return navigate(tabId, url)
+    .then(function () { return runInTab(tabId, extractHtml); })
+    .then(function (r) {
+      var ok = isRealPage(url, r.html);
+      return { ok: ok, status: ok ? 200 : 0, url: r.url, text: r.html,
+               bytes: r.html.length, ms: Date.now() - t0, via: 'tab-navigate',
+               // whatever loaded was not the article: say so rather than hand
+               // back a block page that parses into an empty roster
+               excerpt: ok ? undefined : excerptOf(r.html),
+               intercepted: ok ? undefined : true };
     });
 }
 
@@ -246,21 +329,23 @@ function fetchPageInTab(url) {
   return enqueue(function () {
     return acquireTab().then(function (t) {
       return tabOrigin(t.id).then(function (origin) {
-        // already somewhere on liquipedia.net: a same-origin fetch is quicker
-        // than another navigation, and the cookie is sent without question
-        if (origin === 'https://liquipedia.net') {
-          return runInTab(t.id, sameOriginFetch, [url]).then(function (r) {
-            return { ok: r.ok, status: r.status, url: r.url, text: r.text,
-                     bytes: (r.text || '').length, ms: Date.now() - t0, via: 'tab-fetch',
-                     excerpt: r.ok ? undefined : excerptOf(r.text), error: r.error };
+        // already somewhere on liquipedia.net: try the cheap same-origin fetch
+        // first, and navigate only if it comes back with something else
+        var quick = origin === 'https://liquipedia.net'
+          ? fetchInTab(t.id, url, t0).catch(function () { return null; })
+          : Promise.resolve(null);
+        return quick.then(function (r) {
+          if (r && r.ok) return r;
+          return navigateInTab(t.id, url, t0).then(function (viaNav) {
+            // `retriedAfter` belongs to the worker fetch that got us here, so
+            // the rung skipped inside the tab is reported under its own name
+            if (r) {
+              viaNav.afterTabFetch = { status: r.status, bytes: r.bytes,
+                                       intercepted: r.intercepted, error: r.error };
+            }
+            return viaNav;
           });
-        }
-        return navigate(t.id, url)
-          .then(function () { return runInTab(t.id, extractHtml); })
-          .then(function (r) {
-            return { ok: true, status: 200, url: r.url, text: r.html,
-                     bytes: r.html.length, ms: Date.now() - t0, via: 'tab-navigate' };
-          });
+        });
       });
     }).then(function (res) { releaseTab(); return res; },
             function (e) {

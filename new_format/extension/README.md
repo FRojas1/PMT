@@ -57,15 +57,37 @@ idle. If a Liquipedia tab is already open it is borrowed and left alone.
 - **Searches** navigate the tab and read the results after the page's scripts
   have run. They are serialised and spaced 1.2s apart.
 - **Liquipedia pages** try a plain credentialed fetch first, since that is much
-  quicker when the cookie travels, and drop to the tab the moment a challenge
-  comes back. Inside the tab, if it is already on liquipedia.net the page is
-  read with a same-origin fetch; otherwise the tab navigates to it.
+  quicker when the cookie travels, and drop to the tab the moment that comes
+  back as anything other than the article. The read escalates through three
+  rungs and stops at the first that returns a real page:
+
+  | Rung | `via` | Notes |
+  |---|---|---|
+  | worker fetch | `worker` | fastest; works only when the clearance cookie travels |
+  | tab fetch | `tab-fetch` | same-origin, from inside the tab — skipped unless the tab is already on liquipedia.net |
+  | tab navigation | `tab-navigate` | the tab simply goes to the page, exactly as you would |
+
+  The escalation is deliberately blind to *why* a rung failed, because the
+  failure modes look nothing alike: a Cloudflare challenge is a 403 with a
+  captcha in it, a school or office web filter is usually a **200 serving its
+  own block page**, and a DNS blackhole is no response at all — the fetch just
+  throws. Each of those drops to the next rung.
+
+  A 200 is therefore not taken at face value: the body has to carry MediaWiki's
+  markers (`mw-parser-output` and friends) to count as the article. That check
+  is for what a Liquipedia page *has* rather than for what a block page *says* —
+  a blocklist of filter vendors' wording would both miss the next filter and
+  fire on an article that happens to quote one. An intercepted response is
+  logged with `"intercepted": true` and an excerpt of whatever answered instead,
+  rather than being parsed into a thread with an empty roster in it.
 
 Search results are cached forever, so a repeat run performs **zero** searches —
 which is the main defence against being rate-limited in the first place.
 
 The run log records the route every request took (`"via"`: `worker`, `tab-fetch`,
-`tab-navigate`, `brave-tab`) and, on a fallback, what triggered it.
+`tab-navigate`, `brave-tab`) and, on a fallback, what triggered it —
+`"retriedAfter"` for the worker fetch that was abandoned, `"afterTabFetch"` for
+a tab fetch that was skipped past.
 
 ### Liquipedia's own search is not used
 

@@ -69,7 +69,8 @@ function fetchDoc(url, label) {
         bytes: res.bytes, ms: res.ms, contentType: res.contentType,
         redirectedTo: res.url !== url ? res.url : undefined,
         error: res.error, headers: res.headers, excerpt: res.excerpt,
-        challenge: res.challenge, retriedAfter: res.retriedAfter
+        challenge: res.challenge, intercepted: res.intercepted,
+        retriedAfter: res.retriedAfter, afterTabFetch: res.afterTabFetch
       };
       if (res.ok) PMTLog.info('fetch ' + tag, info);
       else PMTLog.fail('fetch ' + tag + ' rejected', info);
