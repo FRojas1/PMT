@@ -1,0 +1,78 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>HLTV Post-Match Thread - options</title>
+<style>
+  body { font: 14px/1.5 Arial, sans-serif; max-width: 640px; margin: 32px auto; padding: 0 16px; }
+  h1 { font-size: 18px; }
+  label { display: block; margin: 18px 0 4px; font-weight: 600; }
+  input[type=text], textarea { width: 100%; box-sizing: border-box; padding: 7px 9px;
+    border: 1px solid #bbb; border-radius: 3px; font: 13px/1.4 Consolas, monospace; }
+  textarea { min-height: 180px; }
+  .hint { font-size: 12px; color: #666; margin-top: 4px; }
+  button { margin-top: 18px; padding: 8px 18px; font-weight: 600; cursor: pointer; }
+  #status, #cacheStatus { margin-left: 12px; color: #227722; }
+  .run { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+  .run h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+  .run .meta { font-size: 12px; color: #666; }
+  .run .bad { color: #c0392b; font-weight: 600; }
+  .run button { margin-top: 6px; padding: 4px 10px; font-size: 12px; }
+  .run pre { max-height: 220px; overflow: auto; background: #f6f6f7; padding: 8px;
+             font-size: 11px; line-height: 1.35; margin: 6px 0 0; display: none; }
+  .run pre.open { display: block; }
+</style>
+
+<h1>HLTV Post-Match Thread</h1>
+
+<label for="subreddit">Subreddit</label>
+<input type="text" id="subreddit">
+<div class="hint">The submit page opened after generating: old.reddit.com/r/&lt;this&gt;/submit</div>
+
+<label><input type="checkbox" id="autoOpen"> Open the reddit submit page automatically</label>
+
+<label for="flair">Post flair</label>
+<input type="text" id="flair">
+<div class="hint">
+  Applied on the submit page. Leave empty to skip. A toast in the corner of the submit
+  page reports whether it worked.
+</div>
+
+<label for="flairSelector">Flair element selector (advanced)</label>
+<input type="text" id="flairSelector">
+<div class="hint">
+  CSS selector for the flair to click, after the picker is opened with
+  <code>.flairselect-btn</code>. Clear it to fall back to matching the flair name above
+  against the picker's labels.
+</div>
+
+<label for="flairApplySelector">Flair apply button (advanced)</label>
+<input type="text" id="flairApplySelector">
+<div class="hint">
+  Clicked after the flair is picked, to commit it. Clear it to skip. A button that turns
+  out to belong to the post's own form is never clicked, whatever this says.
+</div>
+
+<label for="logos">Team logo flair overrides</label>
+<textarea id="logos" spellcheck="false"></textarea>
+<div class="hint">
+  One per line, <code>HLTV team name = flair slug</code>. The body renders a team's flag as
+  <code>[flag](#&lt;slug&gt;-logo)</code>. <code>src/teams.js</code> is generated from the
+  subreddit stylesheet and the Valve ranking's top 200 &mdash; a team that has no flair there
+  falls back to its country/region anchor (<code>[&#127466;&#127482;](#lang-eu)</code>), which is
+  what the sample threads do. Use this box to add a team the generated table missed, or to
+  correct one of its heuristic matches.
+</div>
+
+<button id="save">Save</button><span id="status"></span>
+
+<h1 style="margin-top:36px">Diagnostics</h1>
+<p class="hint" style="margin:0 0 8px">
+  The last five runs are kept here, newest first. Copy one and paste it when reporting a
+  problem &mdash; it records every fetch, cache decision and parse result, with no page
+  contents beyond sizes and element counts.
+</p>
+<div id="runs"></div>
+<button id="clearLogs">Clear logs</button>
+<button id="clearCache">Forget Liquipedia links</button>
+<span id="cacheStatus"></span>
+
+<script src="options.js"></script>

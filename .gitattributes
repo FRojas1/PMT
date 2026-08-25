@@ -1,0 +1,9 @@
+# Keep LF everywhere, in the repo and in the working tree.
+#
+# The sample threads are byte-exact oracles: the renderer reproduces their
+# whitespace literally, including trailing double spaces, and the test differ
+# compares line for line. Letting git rewrite line endings per-platform would
+# make those comparisons depend on which machine ran them.
+* text=auto eol=lf
+
+*.png binary

@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "HLTV Post-Match Thread",
+  "description": "Turns an HLTV match page into a r/GlobalOffensive post-match thread: copies the body to your clipboard and opens the submit page with the title filled in.",
+  "version": "1.0.0",
+  "permissions": [
+    "storage",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://www.hltv.org/*",
+    "https://old.reddit.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.hltv.org/matches/*"
+      ],
+      "js": [
+        "src/teams.js",
+        "src/pmt.js",
+        "src/content.js"
+      ],
+      "css": [
+        "src/panel.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://old.reddit.com/r/*/submit*"
+      ],
+      "js": [
+        "src/reddit.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "src/options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "HLTV Post-Match Thread"
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  }
+}

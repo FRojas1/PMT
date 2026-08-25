@@ -1,0 +1,85 @@
+.pmt-launch {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 2147483000;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 4px;
+  background: #2d6ca2;
+  color: #fff;
+  font: 600 13px/1 Arial, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .35);
+}
+.pmt-launch:hover { background: #357cb8; }
+
+.pmt-panel {
+  position: fixed;
+  right: 18px;
+  bottom: 62px;
+  z-index: 2147483000;
+  display: none;
+  width: 560px;
+  max-width: calc(100vw - 36px);
+  max-height: calc(100vh - 100px);
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(128, 128, 128, .35);
+  border-radius: 6px;
+  background: #ffffff;
+  color: #16191f;
+  font: 12px/1.45 Arial, sans-serif;
+  box-shadow: 0 6px 26px rgba(0, 0, 0, .35);
+}
+.pmt-panel.pmt-open { display: flex; }
+
+.pmt-head { display: flex; align-items: center; justify-content: space-between; }
+.pmt-title-label { font-weight: 700; font-size: 13px; }
+.pmt-x {
+  border: 0; background: none; color: inherit;
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px;
+}
+
+.pmt-label { font-size: 11px; opacity: .7; margin-top: 2px; }
+
+.pmt-input, .pmt-hl, .pmt-body {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid rgba(128, 128, 128, .45);
+  border-radius: 3px;
+  background: #fbfbfc;
+  color: inherit;
+  font: 12px/1.4 Consolas, "Courier New", monospace;
+  resize: vertical;
+}
+.pmt-body { flex: 1 1 auto; min-height: 220px; white-space: pre; overflow: auto; }
+
+.pmt-row { display: flex; gap: 8px; margin-top: 4px; }
+.pmt-btn {
+  flex: 1 1 auto;
+  padding: 7px 10px;
+  border: 1px solid rgba(128, 128, 128, .45);
+  border-radius: 3px;
+  background: #f0f1f3;
+  color: #16191f;
+  font: 600 12px/1 Arial, sans-serif;
+  cursor: pointer;
+}
+.pmt-btn:hover { background: #e4e6ea; }
+.pmt-primary { background: #2d6ca2; border-color: #2d6ca2; color: #fff; }
+.pmt-primary:hover { background: #357cb8; }
+
+.pmt-status { min-height: 15px; font-size: 11px; opacity: .8; }
+.pmt-status.pmt-error { color: #c0392b; opacity: 1; }
+
+/* HLTV's night mode */
+body.night-mode .pmt-panel { background: #1b2733; color: #e3e8ee; }
+body.night-mode .pmt-input,
+body.night-mode .pmt-hl,
+body.night-mode .pmt-body { background: #16202a; color: #e3e8ee; }
+body.night-mode .pmt-btn { background: #24313f; color: #e3e8ee; }
+body.night-mode .pmt-btn:hover { background: #2c3b4b; }
+body.night-mode .pmt-primary { background: #2d6ca2; }

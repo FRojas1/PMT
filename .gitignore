@@ -1,0 +1,18 @@
+# Saved pages used as test fixtures during development (~115 MB of HLTV,
+# Liquipedia and Brave HTML). They are third-party content and easy to re-save,
+# so they stay out of the repo.
+*.mhtml
+
+# Byte-identical copy of old_format/extension/. The one under old_format/ is
+# canonical; this folder is kept locally only because Chrome may already be
+# loading the extension from it.
+/extension/
+
+# Stray upload
+*.removethisextension
+
+# Tooling noise
+node_modules/
+package-lock.json
+.DS_Store
+Thumbs.db
