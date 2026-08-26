@@ -231,8 +231,19 @@ function searchQueryFor(name) {
   return name + ' counterstrike liquipedia';
 }
 
+/*
+ * Wiki plumbing, which a search will happily return alongside the articles -
+ * the saved FOKUS results carry a `Template:Team_Vitality_Roster_Navbox` link.
+ * Listed by name rather than excluding anything with a colon in it, because a
+ * real article is allowed one: `Counter-Strike:_Global_Offensive`.
+ */
+var MEDIAWIKI_NAMESPACE =
+  /^(Category|Template|File|Image|Help|Special|User|Talk|Portal|Liquipedia|MediaWiki|Module|Property|Form|Concept|Data|Widget)(_talk)?:/i;
+
 function isCounterstrikeArticle(href) {
-  return /^https:\/\/liquipedia\.net\/counterstrike\/[^?#]+$/.test(href) &&
+  var m = /^https:\/\/liquipedia\.net\/counterstrike\/([^?#]+)$/.exec(href || '');
+  if (!m) return false;
+  return !MEDIAWIKI_NAMESPACE.test(m[1]) &&
     !/\/Main_Page$/.test(href) &&
     !/\/index\.php/.test(href);
 }

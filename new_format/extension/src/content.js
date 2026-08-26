@@ -473,12 +473,14 @@ function generate(opts) {
       return fetchDoc(url, 'liquipedia event').then(function (r) {
         var kind = liquipediaPageKind(r.doc);
         // an event that resolved to a team page would put that team's streams
-        // and a bracket that is not this one into the thread
-        if (kind !== 'tournament' && kind !== 'unknown') {
+        // and a bracket that is not this one into the thread; as with teams,
+        // the page has to prove what it is rather than just fail to look wrong
+        if (kind !== 'tournament') {
           PMTLog.warn('liquipedia event page is not a tournament page', {
             url: url, kind: kind, title: lpPageTitle(r.doc), categories: pageCategories(r.doc).slice(0, 6)
           });
-          notes.push('Liquipedia event link was ' + describeKind(kind) + ', ignored');
+          notes.push('Liquipedia event link was ' + describeKind(kind) +
+                     ' (' + (lpPageTitle(r.doc) || url) + '), ignored');
           return cacheForget(liquipediaCacheKey('event', d.event.url)).then(function () { return null; });
         }
         return { url: url, doc: r.doc };
@@ -501,14 +503,25 @@ function generate(opts) {
            * existed - `Bebop` once came back as European Pro League Series 6
            * Play-In, and the thread listed the tournament's Twitter as the
            * team's. Better to print the HLTV name alone and say why.
+           *
+           * The page has to *prove* it is a team, rather than merely fail to
+           * look like something else. Letting an unrecognised page through was
+           * the more cautious-sounding rule and the wrong one: it let
+           * `/counterstrike/Qualifier_Tournaments`, an index page with no
+           * infobox and no roster on it, print as a team called "Qualifier
+           * Tournaments". Nothing is lost by insisting - a page carrying
+           * neither a team infobox nor a squad table has nothing to contribute
+           * anyway, so rejecting it costs exactly the name it would have got
+           * wrong.
            */
           var kind = liquipediaPageKind(r.doc);
-          if (kind !== 'team' && kind !== 'unknown') {
+          if (kind !== 'team') {
             PMTLog.warn('liquipedia page for ' + name + ' is not a team page', {
               url: url, kind: kind, title: lpPageTitle(r.doc),
               categories: pageCategories(r.doc).slice(0, 6)
             });
-            notes.push('Liquipedia link for ' + name + ' was ' + describeKind(kind) + ', ignored');
+            notes.push('Liquipedia link for ' + name + ' was ' + describeKind(kind) +
+                       ' (' + (lpPageTitle(r.doc) || url) + '), ignored');
             // do not remember it, or every future run repeats the mistake
             return cacheForget(liquipediaCacheKey('team', d.teams[i].urlPlain))
               .then(function () { return null; });

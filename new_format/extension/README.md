@@ -155,27 +155,43 @@ listing that tournament as one of the teams, wearing the tournament's Twitter
 and Twitch. It renders perfectly. It is just wrong — which is the failure mode
 worth spending code on, because nothing about the output looks broken.
 
-So whatever comes back is identified before it is used. Liquipedia says what
-every page is, at the bottom, in its categories: team pages are filed under
-`Teams` (plus `Russian Teams`, `CS2 Teams`), tournaments under `Tournaments`,
-players under `Players`. A tournament is *also* filed under `Team Tournaments`,
-so the match is anchored to the end of the category — which is what keeps that
-from reading as a team. If the categories are missing the infobox decides
-instead: a team is described by who runs it and what it has won (`Approx. Total
-Winnings`, `In-Game Leader`), a tournament by when it is and what it pays
-(`Prize Pool`, `Liquipedia Tier`, `Start Date`).
+Liquipedia labels the infobox with what the page is, so that is the whole check:
+
+| Header | Page |
+|---|---|
+| `Team Information` | a team |
+| `League Information` | a tournament |
+| `Player Information` | a player |
+
+The categories at the foot of the page (`Teams`, `Tournaments`, `Players`) are
+kept as a second opinion for pages carrying no infobox at all. That only ever
+matters for events, whose streams and bracket are read from the body — a team
+page with no infobox has no name and no links to give, so there is nothing to
+rescue. Matching there is anchored to the *end* of the category, because a
+tournament is also filed under `Team Tournaments`.
+
+**The page must prove what it is.** A page that matches nothing is rejected, not
+allowed through. The permissive rule sounds like the careful one and is not: it
+let `/counterstrike/Qualifier_Tournaments` — an index page, no infobox, no
+roster — print as a team called "Qualifier Tournaments". Nothing is lost by
+insisting, since a page with no team infobox has nothing to contribute anyway.
 
 A page of the wrong kind is **discarded, not used**: the thread falls back to
-HLTV's name and flag, the run log says what was found instead, and the panel's
-status line says so in words — `Liquipedia link for Bebop was a tournament
-page, ignored`. The bad URL is also dropped from the cache, or every future run
-would repeat the mistake. A page whose kind cannot be determined at all is
-allowed through, so an unusual-but-real team page is never thrown away on a
-hunch.
+HLTV's name and flag, the run log says what was found instead, and the panel
+says so in words — `Liquipedia link for Bebop was a tournament page (European
+Pro League Series 6 Play-In), ignored`. The bad URL is dropped from the cache
+too, or every future run would repeat the mistake.
+
+Wiki plumbing is filtered out one step earlier, when results are picked:
+`Category:`, `Template:`, `Special:` and friends are not articles. The saved
+FOKUS results carry a `Template:Team_Vitality_Roster_Navbox` link, which was
+eligible before. Namespaces are listed by name rather than excluding anything
+with a colon in it, because a real article is allowed one
+(`Counter-Strike:_Global_Offensive`).
 
 Teams that genuinely have no Liquipedia page — which is most of the field in an
-open qualifier — land in the same place they always did: `no Liquipedia page
-for X`, and a thread built from HLTV alone.
+open qualifier — land where they always did: `no Liquipedia page for X`, and a
+thread built from HLTV alone.
 
 ## Details worth knowing
 
