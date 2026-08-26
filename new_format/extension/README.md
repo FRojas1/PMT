@@ -22,18 +22,18 @@ Everything comes off the match page unless listed here.
 |---|---|
 | HLTV event page | the venue for the Setting line, and a name → flag directory used to give the next bracket opponent a flag |
 | HLTV map stats page | **only for maps that went to overtime** — the match page reports OT as a single aggregate (`(4:2)`), and the per-half split the format needs is in the round history |
-| Brave search ×3 | locating the Liquipedia event and team pages |
+| Search ×3 | locating the Liquipedia event and team pages — Google, falling back to Brave |
 | Liquipedia event page | stream links, and the bracket for "advances to … and will face …" |
 | Liquipedia team pages ×2 | full team name, social links, roster, coach, benched players |
 
-**Only the Brave lookups are cached.** The HLTV↔Liquipedia mapping is stored in
+**Only the search lookups are cached.** The HLTV↔Liquipedia mapping is stored in
 `chrome.storage.local` keyed by the HLTV URL and kept indefinitely, so a team is
 searched for once and never again. Page *contents* are always re-read, so a
 thread can never be built from a stale roster, prize pool or ranking.
 
 The three resolved Liquipedia URLs appear in the panel. Editing one and hitting
 **Regenerate** uses it and writes it to the cache — which is also the fallback if
-Brave ever fails or returns the wrong article.
+search ever fails or returns the wrong article.
 
 ## Why everything goes through a background tab
 
@@ -42,11 +42,11 @@ Both sources refuse a service-worker fetch, for different reasons:
 | Source | Response | Reason |
 |---|---|---|
 | Liquipedia | 403, 2059 bytes, "Verify you are human" | needs the clearance cookie it hands out after you pass the check in a browser |
-| Brave | 429, "your browser does not seem to have JavaScript enabled" | a captcha, which needs a page's JavaScript to run |
+| Google / Brave | Brave: 429, "your browser does not seem to have JavaScript enabled"; Google: a redirect to `/sorry/` | a captcha, which needs a page's JavaScript to run |
 
 The Liquipedia half was proven by fetching one URL twice from the same page at
 the same moment: `credentials: 'include'` returned 200/380 KB, `credentials:
-'omit'` returned 403/2059 bytes. The Brave half cannot be fixed by any fetch at
+'omit'` returned 403/2059 bytes. The search half cannot be fixed by any fetch at
 all — no fetch runs JavaScript.
 
 So a background tab does the work. It is a real browser: it has the cookies, it
@@ -55,7 +55,9 @@ opened lazily (inactive), shared for the whole run, and closed when the run goes
 idle. If a Liquipedia tab is already open it is borrowed and left alone.
 
 - **Searches** navigate the tab and read the results after the page's scripts
-  have run. They are serialised and spaced 1.2s apart.
+  have run. They are serialised and spaced 1.2s apart. Google is asked first and
+  Brave only if it comes back empty or blocked (`via`: `google-tab` /
+  `brave-tab`) — see below.
 - **Liquipedia pages** try a plain credentialed fetch first, since that is much
   quicker when the cookie travels, and drop to the tab the moment that comes
   back as anything other than the article. The read escalates through three
@@ -85,7 +87,7 @@ Search results are cached forever, so a repeat run performs **zero** searches �
 which is the main defence against being rate-limited in the first place.
 
 The run log records the route every request took (`"via"`: `worker`, `tab-fetch`,
-`tab-navigate`, `brave-tab`) and, on a fallback, what triggered it —
+`tab-navigate`, `google-tab`, `brave-tab`) and, on a fallback, what triggered it —
 `"retriedAfter"` for the worker fetch that was abandoned, `"afterTabFetch"` for
 a tab fetch that was skipped past.
 
@@ -95,8 +97,42 @@ It looked tempting — no captcha, and its "go" jump resolves `Vitality` straigh
 to `Team_Vitality`. But it resolves `Spirit` to `/counterstrike/Spirit`, which is
 a **player** page, and it ranked FaZe Clan first for "IEM Beijing 2026 Open
 Qualifier". Wrong-but-plausible is the worst failure mode available here, because
-the thread still renders — just with the wrong team's roster in it. Brave was
-correct on every case tested, so Brave it is.
+the thread still renders — just with the wrong team's roster in it. A general
+search engine was correct on every case tested, so a search engine it is.
+
+### Google first, Brave second
+
+Brave is right about the teams everyone has heard of and gets worse as they get
+smaller — which is the wrong way round, since an obscure org is exactly the one
+nobody proofreading the thread will catch. Google was correct on the obscure
+cases (`yawara` → `Yawara_E-Sports`, `FOKUS` → `FOKUS`), so it is asked first.
+
+Brave is kept rather than deleted because Google is the stricter of the two about
+automation: a captcha there must not take the whole run down. A blocked engine is
+detected (a redirect to `/sorry/`, `consent.google.com`, or a body that talks
+about unusual traffic) and recorded in the trace as `"blocked": true`, which is
+worth telling apart from a genuine miss — a captcha means *ask someone else*,
+an empty result means this name will not be found by asking twice.
+
+**Neither engine's markup is parsed.** Naming the classes a result is built from
+is what makes SERP scraping rot, and Google's are generated (`.PMDqCb`,
+`.NMq1me`, different next month). But only *one* link is ever needed, so the
+markup can be ignored: collect every anchor in the results column and keep the
+first that points at a Counter-Strike article. That rule is identical on both
+engines, which is why one extractor serves both — and it is markedly sturdier
+than the `.result-content > a` it replaced, which returned nothing the moment
+Brave reshuffled. The only ids used are `#rso` / `#search` / `#center_col`, and
+only to scope the scan; Brave has none of them and falls through to the body.
+
+One wrinkle that scoping earns its keep on: in the saved `yawara` page the first
+Liquipedia link on the page is an invisible zero-text anchor outside `#rso`.
+
+**Tab subpages are demoted.** Google ranks a team's `/Matches` and `/Results`
+pages as results in their own right, so `FOKUS/Results` can outrank `FOKUS`.
+Those are the same article one level down, and the parent is the one with the
+roster on it, so a known tab suffix is stripped. Event pages are nested too
+(`Esports_World_Cup/2026`), which is why the tabs are named explicitly rather
+than any trailing segment being treated as a subpage.
 
 ## Details worth knowing
 

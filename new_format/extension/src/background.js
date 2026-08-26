@@ -5,8 +5,9 @@
  *   Liquipedia  403 + "Verify you are human" unless its clearance cookie rides
  *               along (same URL, same instant: with cookies 200/380KB, without
  *               403/2059 bytes)
- *   Brave       429 + "your browser does not seem to have JavaScript enabled" -
- *               a captcha a fetch can never solve
+ *   Search      a captcha a fetch can never solve - Brave answers 429 with
+ *               "your browser does not seem to have JavaScript enabled", Google
+ *               redirects to /sorry/
  *
  * A tab is a real browser: it has the cookies, it runs the JavaScript, and it
  * looks like the user because it is the user. So searches are performed by
@@ -154,14 +155,37 @@ function tabOrigin(tabId) {
  * These run inside the tab, so they see the page after its JavaScript has run.
  */
 
-function extractSearchResults() {
-  var out = { url: location.href, title: document.title, results: [] };
-  // Brave's organic results
-  Array.prototype.forEach.call(document.querySelectorAll('.result-content > a'), function (a) {
-    if (a.href) out.results.push({ href: a.href, text: (a.textContent || '').trim().slice(0, 80) });
-  });
-  out.bodyExcerpt = (document.body ? document.body.textContent : '').replace(/\s+/g, ' ').trim().slice(0, 200);
-  return out;
+/*
+ * Every link in the results column, in the order the page lists them.
+ *
+ * Deliberately not a result parser. Picking apart a SERP means naming the
+ * classes its results are built from, and Google's are generated - `.PMDqCb`,
+ * `.NMq1me`, different next month. But this only ever needs *one* link, so the
+ * markup can be ignored entirely: collect every anchor and let the caller keep
+ * the first that points at a Counter-Strike article. That rule is identical on
+ * both engines, which is why one extractor serves both.
+ *
+ * Scoped to the results column because a SERP has links elsewhere - ads, "people
+ * also ask", and on one saved Google page an invisible zero-text anchor sitting
+ * outside #rso. These container ids are the stable part of Google's markup;
+ * Brave has none of them and falls through to the body, as it always did.
+ */
+function extractResultLinks() {
+  var root = document.querySelector('#rso') || document.querySelector('#search') ||
+             document.querySelector('#center_col') || document.querySelector('#results') ||
+             document.body;
+  var hrefs = [];
+  if (root) {
+    Array.prototype.forEach.call(root.querySelectorAll('a[href]'), function (a) {
+      if (a.href) hrefs.push(a.href);
+    });
+  }
+  return {
+    url: location.href,
+    title: document.title,
+    hrefs: hrefs,
+    bodyExcerpt: (document.body ? document.body.textContent : '').replace(/\s+/g, ' ').trim().slice(0, 400)
+  };
 }
 
 function extractHtml() {
@@ -181,18 +205,30 @@ function sameOriginFetch(u) {
 /* ----------------------------------------------------------------- actions */
 
 /*
- * Searching is done with Brave, in the tab.
+ * Searching is done in the tab, Google first and Brave behind it.
  *
  * Liquipedia's own search is not usable for this: its "go" jump resolves
  * `Vitality` to Team_Vitality but resolves `Spirit` to the *player* page
  * `/counterstrike/Spirit`, and its results ranking put FaZe Clan first for
  * "IEM Beijing 2026 Open Qualifier". Wrong-but-plausible is the worst failure
  * mode here, because the thread still renders - just with another team's roster
- * in it. Brave got every case right in testing, so Brave it is.
+ * in it.
+ *
+ * Brave is right about the teams everyone has heard of and gets steadily worse
+ * as they get smaller, which is the wrong way round: an obscure org is exactly
+ * the one nobody proofreading the thread will catch. Google answered the
+ * obscure cases correctly - `yawara` -> Yawara_E-Sports, `FOKUS` -> FOKUS - so
+ * it goes first. Brave stays as the fallback rather than being deleted, because
+ * Google is the stricter of the two about automation and a captcha there must
+ * not take the whole run down with it.
  */
-function braveUrlFor(name) {
-  return 'https://search.brave.com/search?q=' +
-    encodeURIComponent(name + ' counterstrike liquipedia') + '&source=web';
+var SEARCH_ENGINES = [
+  { name: 'google', url: function (q) { return 'https://www.google.com/search?q=' + encodeURIComponent(q); } },
+  { name: 'brave', url: function (q) { return 'https://search.brave.com/search?q=' + encodeURIComponent(q) + '&source=web'; } }
+];
+
+function searchQueryFor(name) {
+  return name + ' counterstrike liquipedia';
 }
 
 function isCounterstrikeArticle(href) {
@@ -201,11 +237,56 @@ function isCounterstrikeArticle(href) {
     !/\/index\.php/.test(href);
 }
 
-function pickResult(results) {
-  for (var i = 0; i < results.length; i++) {
-    if (isCounterstrikeArticle(results[i].href)) return results[i].href.split('#')[0];
+// Both engines sometimes route a result through their own redirector.
+function unwrapRedirect(href) {
+  var m = /^https?:\/\/(?:www\.)?(?:google\.[^/]+|search\.brave\.com)\/url\?(.*)$/.exec(href || '');
+  if (!m) return href;
+  try {
+    var p = new URLSearchParams(m[1]);
+    return p.get('q') || p.get('url') || href;
+  } catch (e) {
+    return href;
+  }
+}
+
+// A team's Matches and Results tabs are separate pages and Google ranks them as
+// separate results, so "FOKUS/Results" can outrank "FOKUS". They are the same
+// article one level down; the parent is the one with the roster on it. Event
+// pages are nested too (Esports_World_Cup/2026), hence naming the tabs rather
+// than treating any trailing path segment as a subpage.
+var LIQUIPEDIA_SUBPAGE =
+  /\/(Matches|Results|Statistics|Achievements|Additional_Content|Played_Matches)(\/[A-Za-z0-9_]+)?$/;
+
+function pickResult(hrefs) {
+  for (var i = 0; i < hrefs.length; i++) {
+    var href = unwrapRedirect(hrefs[i]).split('#')[0];
+    if (isCounterstrikeArticle(href)) return href.replace(LIQUIPEDIA_SUBPAGE, '');
   }
   return '';
+}
+
+/*
+ * Did the engine answer, or did it stop us at the door?
+ *
+ * Worth telling apart from "no results": a captcha means try the other engine,
+ * while a genuine miss means this name is not going to be found by asking the
+ * same question twice. Google sends a challenge to /sorry/ and EU consent to
+ * consent.google.com, and the tab's own URL gives that away without needing
+ * permission to run code on those origins - which is just as well, since it
+ * will not grant it.
+ */
+function looksBlocked(landedUrl, page) {
+  if (/\/sorry\/|consent\.google\.|\/challenge/i.test(landedUrl || '')) return true;
+  var text = (page && page.bodyExcerpt) || '';
+  return /unusual traffic|are you a robot|not a robot|before you continue|enable javascript|captcha/i.test(text);
+}
+
+function tabUrl(tabId) {
+  return new Promise(function (resolve) {
+    chrome.tabs.get(tabId, function (t) {
+      resolve((!chrome.runtime.lastError && t && t.url) || '');
+    });
+  });
 }
 
 function spaceOutSearches() {
@@ -214,30 +295,63 @@ function spaceOutSearches() {
   return new Promise(function (r) { setTimeout(r, wait); });
 }
 
+// One engine: navigate, read the links, keep the first article. Never rejects -
+// a failed engine is a step in the trace, and the next one still gets its turn.
+function askEngine(tabId, engine, query, trace) {
+  return spaceOutSearches()
+    .then(function () { return navigate(tabId, engine.url(query)); })
+    .then(function () { return tabUrl(tabId); })
+    .then(function (landed) {
+      // a challenge page is a different origin, and injection there is refused
+      return runInTab(tabId, extractResultLinks).then(
+        function (page) { return { landed: landed, page: page }; },
+        function (e) { return { landed: landed, page: null, error: String(e.message || e) }; }
+      );
+    })
+    .then(function (got) {
+      var page = got.page;
+      var url = page ? pickResult(page.hrefs) : '';
+      var blocked = looksBlocked(got.landed || (page && page.url), page);
+      trace.push({
+        step: engine.name,
+        title: page ? page.title : undefined,
+        links: page ? page.hrefs.length : 0,
+        blocked: blocked || undefined,
+        error: got.error,
+        // when nothing came back, the page itself usually says why
+        excerpt: url ? undefined : (page ? page.bodyExcerpt : undefined)
+      });
+      return url;
+    }, function (e) {
+      trace.push({ step: engine.name, error: String(e.message || e) });
+      return '';
+    });
+}
+
 function searchInTab(kind, name) {
+  var query = searchQueryFor(name);
   var trace = [];
   return enqueue(function () {
     return acquireTab()
       .then(function (t) {
-        return spaceOutSearches()
-          .then(function () { return navigate(t.id, braveUrlFor(name)); })
-          .then(function () { return runInTab(t.id, extractSearchResults); })
-          .then(function (b) {
-            var url = pickResult(b.results);
-            trace.push({
-              step: 'brave', title: b.title, results: b.results.length,
-              // when nothing came back, the page itself says why
-              excerpt: url ? undefined : b.bodyExcerpt,
-              firstHrefs: url ? undefined : b.results.slice(0, 3).map(function (r) { return r.href; })
+        // each engine in turn, stopping at the first that answers - a second
+        // engine is only ever asked when the first came back empty or blocked
+        return SEARCH_ENGINES.reduce(function (chain, engine) {
+          return chain.then(function (found) {
+            if (found && found.url) return found;
+            return askEngine(t.id, engine, query, trace).then(function (url) {
+              return { url: url, via: engine.name + '-tab' };
             });
-            return { url: url, via: 'brave-tab', trace: trace };
           });
+        }, Promise.resolve(null));
       })
-      .then(function (res) { releaseTab(); return res; },
-            function (e) {
-              releaseTab();
-              return { url: '', via: 'error', error: String(e.message || e), trace: trace };
-            });
+      .then(function (res) {
+        releaseTab();
+        return { url: res.url, via: res.url ? res.via : 'none', trace: trace };
+      }, function (e) {
+        releaseTab();
+        return { url: '', via: 'error', error: String(e.message || e), trace: trace };
+      });
   });
 }
 

@@ -68,6 +68,6 @@ subreddit's work, included here only as a build input.
 
 ## Test fixtures
 
-Development used ~115 MB of saved HLTV, Liquipedia and Brave pages as fixtures.
-They are not in the repo (see `.gitignore`) — they are third-party page dumps and
-trivial to re-save with *Save page as → Web page, single file*.
+Development used ~115 MB of saved HLTV, Liquipedia, Google and Brave pages as
+fixtures. They are not in the repo (see `.gitignore`) — they are third-party page
+dumps and trivial to re-save with *Save page as → Web page, single file*.

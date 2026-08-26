@@ -12,6 +12,7 @@
   "host_permissions": [
     "https://www.hltv.org/*",
     "https://liquipedia.net/*",
+    "https://www.google.com/*",
     "https://search.brave.com/*",
     "https://old.reddit.com/*"
   ],
