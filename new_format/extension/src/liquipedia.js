@@ -37,11 +37,34 @@ var LINK_ORDER = [
   ['threads', 'Threads']
 ];
 
+/*
+ * Links reddit will not have.
+ *
+ * r/GlobalOffensive's spam filter autoremoves posts linking to Russian social
+ * media or Telegram, and it takes down the whole thread over one of them - a
+ * CIS team's infobox routinely carries two or three. They are dropped here, at
+ * the one place a third-party URL can enter the body.
+ *
+ * Matched on the host rather than on the `lp-vk` / `lp-telegram` icon, because
+ * the blocked link is as often the Official Site as it is the VK one. `.ru` is
+ * the rule, and it already covers vk.ru, vkvideo.ru, ok.ru, rutube.ru and the
+ * rest; only the networks sitting on other TLDs have to be named.
+ */
+var BLOCKED_LINK_HOST =
+  /(^|\.)(vk\.(com|cc)|vkplay\.live|t\.me|telegram\.(me|org|dog))$|\.ru$/i;
+
+function isBlockedLink(url) {
+  try {
+    return BLOCKED_LINK_HOST.test(new URL(url, 'https://liquipedia.net').hostname);
+  } catch (e) {
+    return false;
+  }
+}
+
 function infoboxLinks(doc) {
   var byKind = {};
   var box = doc.querySelector('.fo-nttax-infobox');
-  if (!box) return [];
-  Array.prototype.forEach.call(box.querySelectorAll('a'), function (a) {
+  Array.prototype.forEach.call(box ? box.querySelectorAll('a') : [], function (a) {
     var i = a.querySelector('i.lp-icon');
     if (!i) return;
     var m = (i.className || '').match(/lp-([a-z0-9]+)(?:\s|$)/g);
@@ -56,9 +79,17 @@ function infoboxLinks(doc) {
   });
 
   var out = [];
+  var blocked = [];
   LINK_ORDER.forEach(function (pair) {
-    if (byKind[pair[0]]) { out.push({ label: pair[1], url: byKind[pair[0]] }); delete byKind[pair[0]]; }
+    var href = byKind[pair[0]];
+    if (!href) return;
+    delete byKind[pair[0]];
+    if (isBlockedLink(href)) blocked.push(pair[1]);
+    else out.push({ label: pair[1], url: href });
   });
+  // what was dropped, for the run log to name it; the links are the return
+  // value and nothing else reads this
+  out.blocked = blocked;
   return out;
 }
 
@@ -438,6 +469,6 @@ if (typeof module !== 'undefined' && module.exports) {
     nextRound: nextRound, prettyRound: prettyRound, infoboxLinks: infoboxLinks, lpFlag: lpFlag,
     liquipediaPageKind: liquipediaPageKind, pageCategories: pageCategories,
     infoboxHeaders: infoboxHeaders,
-    describeKind: describeKind, lpPageTitle: lpPageTitle
+    describeKind: describeKind, lpPageTitle: lpPageTitle, isBlockedLink: isBlockedLink
   };
 }

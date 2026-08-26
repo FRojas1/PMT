@@ -239,6 +239,19 @@ member ("Loan", "Stand-in", "Trial"). Only staff titles disqualify someone —
 treating every label as staff dropped OG's two loaned-in players, who had just
 played the match. Coaches are pulled from the same column by name.
 
+**Links reddit will not have.** r/GlobalOffensive's spam filter autoremoves a
+post that links to Russian social media or Telegram, and it removes the *whole*
+thread over one link — a CIS team's infobox routinely carries two or three, so
+Spirit's thread would never have survived its own Team Information line. Any
+link on a `.ru` domain, on `vk.com` / `vk.cc` / `vkplay.live`, or on `t.me` /
+`telegram.me` / `telegram.org` is dropped before it reaches the body.
+
+The test is the host, not Liquipedia's `lp-vk` / `lp-telegram` icon, because the
+blocked link is as often the Official Site as it is the VK one. `.ru` covers
+vk.ru, vkvideo.ru, ok.ru and rutube.ru without naming them; only the networks
+sitting on other TLDs are listed. Nothing else about the line changes — the
+remaining links keep their order, and the run log names what went.
+
 **Bracket.** The match is found by team names plus score; its parent match gives
 both the round name and the opponent.
 
@@ -283,7 +296,7 @@ in five deliberate categories:
 | `#spiritw-logo` → `#spirit-logo` (1) | the veto table's sample anchor is the *women's* team flair; every other line in the sample uses `#spirit-logo` |
 | a stray `\t ` line (1) | dropped; Maps 1 and 3 have a plain blank line there |
 | parenthesised asides stripped from highlights (6) | requested fix |
-| extra social links (4) | Liquipedia now lists networks it did not when the sample was made — nothing is dropped, only added |
+| extra social links (2) | Liquipedia lists two networks it did not when the sample was made — Facebook for Vitality, Bilibili for Spirit |
 
 The sample's `NaN` after Spirit's last link is gone.
 

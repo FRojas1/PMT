@@ -40,7 +40,7 @@ Team | Rank | Diff | Total
 **Coach**: [🇫🇷](#lang-fr) XTQZZZ  
   
 
-[🇷🇺](#spirit-logo) **Team Spirit** | [Liquipedia](https://liquipedia.net/counterstrike/Team_Spirit) | [HLTV](https://www.hltv.org/team/7020/spirit) | [Official Site](https://teamspirit.gg/) | [Faceit](https://www.faceit.com/en/teams/06272e30-9aeb-4388-9237-732c22fac86e) | [Twitter](https://twitter.com/Team__Spirit) | [Facebook](https://facebook.com/teamspiritpage) | [Instagram](https://www.instagram.com/team__spirit) | [Weibo](https://weibo.com/7912736021) | [YouTube](https://www.youtube.com/channel/UCCo2nH5KDA1OE4m2VZAEbLg) | [Bilibili](https://space.bilibili.com/3546657450887496) | [VK](https://www.vk.com/team_spirit) | [Telegram](https://telegram.me/tspiritcs)  
+[🇷🇺](#spirit-logo) **Team Spirit** | [Liquipedia](https://liquipedia.net/counterstrike/Team_Spirit) | [HLTV](https://www.hltv.org/team/7020/spirit) | [Official Site](https://teamspirit.gg/) | [Faceit](https://www.faceit.com/en/teams/06272e30-9aeb-4388-9237-732c22fac86e) | [Twitter](https://twitter.com/Team__Spirit) | [Facebook](https://facebook.com/teamspiritpage) | [Instagram](https://www.instagram.com/team__spirit) | [Weibo](https://weibo.com/7912736021) | [YouTube](https://www.youtube.com/channel/UCCo2nH5KDA1OE4m2VZAEbLg) | [Bilibili](https://space.bilibili.com/3546657450887496)  
 **Roster**: [🇷🇺](#lang-ru) magixx ♛ | [🇺🇦](#lang-ua) zont1x | [🇷🇺](#lang-ru) donk | [🇷🇺](#lang-ru) sh1ro ⊕ | [🇧🇾](#lang-by) tN1R  
 **Coach**: [🇷🇺](#lang-ru) hally  
 **Subs/Benched**: [🇷🇺](#lang-ru) chopper  

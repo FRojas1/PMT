@@ -528,6 +528,11 @@ function generate(opts) {
           }
           var parsed = parseTeamPage(r.doc, url);
           PMTLog.info('liquipedia team parsed ' + name, teamSummary(parsed));
+          if (parsed.links.blocked.length) {
+            PMTLog.info('links dropped for ' + name + ' - reddit autoremoves these', {
+              dropped: parsed.links.blocked
+            });
+          }
           if (!parsed.roster.length) {
             PMTLog.warn('liquipedia team ' + name + ' has no roster', {
               url: url,
