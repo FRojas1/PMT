@@ -257,12 +257,35 @@ function unwrapRedirect(href) {
 var LIQUIPEDIA_SUBPAGE =
   /\/(Matches|Results|Statistics|Achievements|Additional_Content|Played_Matches)(\/[A-Za-z0-9_]+)?$/;
 
-function pickResult(hrefs) {
+/*
+ * A team lives at a single path segment - Team_Spirit, K27, FOKUS,
+ * Yawara_E-Sports - while tournaments nest: European_Pro_League/Series_6/Play-In,
+ * Fiesta_Series/1, Esports_World_Cup/2026. So when a *team* is being looked for,
+ * a nested article is passed over in favour of a flat one further down the
+ * results. That is a preference and not a filter: if nothing flat turns up, the
+ * best candidate is still returned and the page it lands on gets checked before
+ * anything is built from it. This is what stops `Bebop` settling for the first
+ * plausible-looking tournament link on the page.
+ */
+function articleSegments(href) {
+  return href.replace(/^https:\/\/liquipedia\.net\/counterstrike\//, '').split('/').length;
+}
+
+function pickResult(hrefs, kind) {
+  var candidates = [];
   for (var i = 0; i < hrefs.length; i++) {
     var href = unwrapRedirect(hrefs[i]).split('#')[0];
-    if (isCounterstrikeArticle(href)) return href.replace(LIQUIPEDIA_SUBPAGE, '');
+    if (isCounterstrikeArticle(href)) {
+      href = href.replace(LIQUIPEDIA_SUBPAGE, '');
+      if (candidates.indexOf(href) < 0) candidates.push(href);
+    }
   }
-  return '';
+  if (kind === 'team') {
+    for (var c = 0; c < candidates.length; c++) {
+      if (articleSegments(candidates[c]) === 1) return candidates[c];
+    }
+  }
+  return candidates[0] || '';
 }
 
 /*
@@ -297,7 +320,7 @@ function spaceOutSearches() {
 
 // One engine: navigate, read the links, keep the first article. Never rejects -
 // a failed engine is a step in the trace, and the next one still gets its turn.
-function askEngine(tabId, engine, query, trace) {
+function askEngine(tabId, engine, query, kind, trace) {
   return spaceOutSearches()
     .then(function () { return navigate(tabId, engine.url(query)); })
     .then(function () { return tabUrl(tabId); })
@@ -310,7 +333,7 @@ function askEngine(tabId, engine, query, trace) {
     })
     .then(function (got) {
       var page = got.page;
-      var url = page ? pickResult(page.hrefs) : '';
+      var url = page ? pickResult(page.hrefs, kind) : '';
       var blocked = looksBlocked(got.landed || (page && page.url), page);
       trace.push({
         step: engine.name,
@@ -339,7 +362,7 @@ function searchInTab(kind, name) {
         return SEARCH_ENGINES.reduce(function (chain, engine) {
           return chain.then(function (found) {
             if (found && found.url) return found;
-            return askEngine(t.id, engine, query, trace).then(function (url) {
+            return askEngine(t.id, engine, query, kind, trace).then(function (url) {
               return { url: url, via: engine.name + '-tab' };
             });
           });

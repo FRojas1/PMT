@@ -10,10 +10,15 @@
  *   - the Liquipedia event and team pages
  *
  * Liquipedia has no lookup by HLTV name, so those three pages are located by
- * Brave search. Those lookups are the one thing that IS cached - keyed by the
- * HLTV URL, kept indefinitely, and editable in the panel - so a team is only
- * ever searched for once. Page contents are always re-read, so a thread can
- * never be built from a stale roster or ranking.
+ * search (Google, then Brave). Those lookups are the one thing that IS cached -
+ * keyed by the HLTV URL, kept indefinitely, and editable in the panel - so a
+ * team is only ever searched for once. Clearing a box in the panel forgets the
+ * saved page and searches again. Page contents are always re-read, so a thread
+ * can never be built from a stale roster or ranking.
+ *
+ * Whatever search returns is checked to be the *kind* of page that was asked
+ * for before it is used: a tournament page parses cleanly into a team that
+ * never existed, and prints as one.
  */
 
 var DEFAULTS = {
@@ -86,6 +91,10 @@ function parseHtml(text) {
 
 /* --------------------------------------------------- liquipedia link cache */
 
+function liquipediaCacheKey(kind, hltvUrl) {
+  return 'lp:' + kind + ':' + hltvUrl;
+}
+
 function cacheGet(key) {
   return new Promise(function (resolve) {
     chrome.storage.local.get([key], function (v) { resolve(v[key] || ''); });
@@ -98,15 +107,36 @@ function cacheSet(key, value) {
   chrome.storage.local.set(patch);
 }
 
-// Resolve an HLTV entity to its Liquipedia page, remembering the answer.
-function liquipediaUrlFor(kind, hltvUrl, searchName, override) {
-  var key = 'lp:' + kind + ':' + hltvUrl;
+function cacheForget(key) {
+  return new Promise(function (resolve) {
+    chrome.storage.local.remove(key, function () { void chrome.runtime.lastError; resolve(); });
+  });
+}
+
+/*
+ * Resolve an HLTV entity to its Liquipedia page, remembering the answer.
+ *
+ * `forget` is an emptied box in the panel. Clearing one and hitting Regenerate
+ * reads as "I do not want this page" - so the remembered answer is thrown away
+ * and the search runs again from scratch, exactly as it would for a team being
+ * seen for the first time. Reloading the same remembered link, which is what it
+ * used to do, is the one thing that cannot be what was meant by clearing it.
+ */
+function liquipediaUrlFor(kind, hltvUrl, searchName, override, forget) {
+  var key = liquipediaCacheKey(kind, hltvUrl);
   if (override) {
     PMTLog.info('liquipedia ' + kind + ' from panel override', { name: searchName, url: override });
     cacheSet(key, override);
     return Promise.resolve(override);
   }
-  return cacheGet(key).then(function (hit) {
+  var remembered = forget
+    ? cacheForget(key).then(function () {
+        PMTLog.info('liquipedia ' + kind + ' box cleared - forgetting the saved page and searching again',
+          { name: searchName, key: key });
+        return '';
+      })
+    : cacheGet(key);
+  return remembered.then(function (hit) {
     if (hit) {
       PMTLog.info('liquipedia ' + kind + ' cache hit', { name: searchName, key: key, url: hit });
       return hit;
@@ -269,7 +299,8 @@ function buildPanel() {
 
   field(panel, 'pmt-title', 'Thread title');
 
-  panel.appendChild(el('div', 'pmt-label', 'Liquipedia pages (found by search, remembered per team)'));
+  panel.appendChild(el('div', 'pmt-label',
+    'Liquipedia pages (found by search, remembered per team - clear one and Regenerate to search for it again)'));
   var lp = el('div', 'pmt-lp');
   ['pmt-lp-event', 'pmt-lp-t1', 'pmt-lp-t2'].forEach(function (id, i) {
     var input = el('input', 'pmt-input');
@@ -292,7 +323,7 @@ function buildPanel() {
 
   var row = el('div', 'pmt-row');
   var regen = el('button', 'pmt-btn', 'Regenerate');
-  regen.addEventListener('click', function () { generate({ noOpen: true }); });
+  regen.addEventListener('click', function () { generate({ noOpen: true, fromPanel: true }); });
   var copy = el('button', 'pmt-btn pmt-primary', 'Copy body');
   copy.addEventListener('click', function () {
     copyText(document.getElementById('pmt-body').value)
@@ -406,6 +437,14 @@ function generate(opts) {
     t2: document.getElementById('pmt-lp-t2').value.trim()
   };
 
+  // An empty box only means "forget this one" when the panel had already filled
+  // it in - on the first run they are all empty because nothing has run yet.
+  var forget = {
+    event: !!opts.fromPanel && !overrides.event,
+    t1: !!opts.fromPanel && !overrides.t1,
+    t2: !!opts.fromPanel && !overrides.t2
+  };
+
   var notes = [];
   var soft = function (label) {
     return function (e) {
@@ -428,21 +467,52 @@ function generate(opts) {
       }).catch(soft('HLTV event page'))
     : Promise.resolve(null);
 
-  var lpEvent = liquipediaUrlFor('event', d.event.url, d.event.name, overrides.event)
+  var lpEvent = liquipediaUrlFor('event', d.event.url, d.event.name, overrides.event, forget.event)
     .then(function (url) {
       if (!url) { notes.push('no Liquipedia event page found'); return null; }
-      return fetchDoc(url, 'liquipedia event').then(function (r) { return { url: url, doc: r.doc }; });
+      return fetchDoc(url, 'liquipedia event').then(function (r) {
+        var kind = liquipediaPageKind(r.doc);
+        // an event that resolved to a team page would put that team's streams
+        // and a bracket that is not this one into the thread
+        if (kind !== 'tournament' && kind !== 'unknown') {
+          PMTLog.warn('liquipedia event page is not a tournament page', {
+            url: url, kind: kind, title: lpPageTitle(r.doc), categories: pageCategories(r.doc).slice(0, 6)
+          });
+          notes.push('Liquipedia event link was ' + describeKind(kind) + ', ignored');
+          return cacheForget(liquipediaCacheKey('event', d.event.url)).then(function () { return null; });
+        }
+        return { url: url, doc: r.doc };
+      });
     }).catch(soft('Liquipedia event'));
 
   var lpTeams = [0, 1].map(function (i) {
     var name = d.teams[i].name;
-    return liquipediaUrlFor('team', d.teams[i].urlPlain, name, overrides[i ? 't2' : 't1'])
+    return liquipediaUrlFor('team', d.teams[i].urlPlain, name, overrides[i ? 't2' : 't1'],
+                            forget[i ? 't2' : 't1'])
       .then(function (url) {
         if (!url) {
           notes.push('no Liquipedia page for ' + name);
           return null;
         }
         return fetchDoc(url, 'liquipedia team ' + name).then(function (r) {
+          /*
+           * Is this actually a team? A tournament page has an infobox with a
+           * name and socials in it, so it parses cleanly into a team that never
+           * existed - `Bebop` once came back as European Pro League Series 6
+           * Play-In, and the thread listed the tournament's Twitter as the
+           * team's. Better to print the HLTV name alone and say why.
+           */
+          var kind = liquipediaPageKind(r.doc);
+          if (kind !== 'team' && kind !== 'unknown') {
+            PMTLog.warn('liquipedia page for ' + name + ' is not a team page', {
+              url: url, kind: kind, title: lpPageTitle(r.doc),
+              categories: pageCategories(r.doc).slice(0, 6)
+            });
+            notes.push('Liquipedia link for ' + name + ' was ' + describeKind(kind) + ', ignored');
+            // do not remember it, or every future run repeats the mistake
+            return cacheForget(liquipediaCacheKey('team', d.teams[i].urlPlain))
+              .then(function () { return null; });
+          }
           var parsed = parseTeamPage(r.doc, url);
           PMTLog.info('liquipedia team parsed ' + name, teamSummary(parsed));
           if (!parsed.roster.length) {

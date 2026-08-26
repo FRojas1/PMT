@@ -33,7 +33,10 @@ thread can never be built from a stale roster, prize pool or ranking.
 
 The three resolved Liquipedia URLs appear in the panel. Editing one and hitting
 **Regenerate** uses it and writes it to the cache — which is also the fallback if
-search ever fails or returns the wrong article.
+search ever fails or returns the wrong article. **Clearing** a box and hitting
+Regenerate forgets the remembered page and searches again from scratch, exactly
+as if the team were being seen for the first time; reloading the same saved link
+is the one thing emptying the box cannot have meant.
 
 ## Why everything goes through a background tab
 
@@ -127,12 +130,52 @@ only to scope the scan; Brave has none of them and falls through to the body.
 One wrinkle that scoping earns its keep on: in the saved `yawara` page the first
 Liquipedia link on the page is an invisible zero-text anchor outside `#rso`.
 
+**A team-shaped URL is preferred.** A team lives at a single path segment
+(`Team_Spirit`, `K27`, `FOKUS`, `Yawara_E-Sports`) while tournaments nest
+(`European_Pro_League/Series_6/Play-In`, `Fiesta_Series/1`). So a team lookup
+passes over a nested article in favour of a flat one further down the results.
+It is a preference rather than a filter — if nothing flat turns up the best
+candidate is still returned, and the page it lands on is checked before anything
+is built from it.
+
 **Tab subpages are demoted.** Google ranks a team's `/Matches` and `/Results`
 pages as results in their own right, so `FOKUS/Results` can outrank `FOKUS`.
 Those are the same article one level down, and the parent is the one with the
 roster on it, so a known tab suffix is stripped. Event pages are nested too
 (`Esports_World_Cup/2026`), which is why the tabs are named explicitly rather
 than any trailing segment being treated as a subpage.
+
+### The page has to be the right kind of page
+
+A search can hand back a page that is not the thing asked for, and none of the
+parsers will complain: a tournament page has an infobox with a name and social
+links in it, so it parses cleanly into a team that never existed. `Bebop` once
+resolved to European Pro League Series 6 Play-In, and the thread went out
+listing that tournament as one of the teams, wearing the tournament's Twitter
+and Twitch. It renders perfectly. It is just wrong — which is the failure mode
+worth spending code on, because nothing about the output looks broken.
+
+So whatever comes back is identified before it is used. Liquipedia says what
+every page is, at the bottom, in its categories: team pages are filed under
+`Teams` (plus `Russian Teams`, `CS2 Teams`), tournaments under `Tournaments`,
+players under `Players`. A tournament is *also* filed under `Team Tournaments`,
+so the match is anchored to the end of the category — which is what keeps that
+from reading as a team. If the categories are missing the infobox decides
+instead: a team is described by who runs it and what it has won (`Approx. Total
+Winnings`, `In-Game Leader`), a tournament by when it is and what it pays
+(`Prize Pool`, `Liquipedia Tier`, `Start Date`).
+
+A page of the wrong kind is **discarded, not used**: the thread falls back to
+HLTV's name and flag, the run log says what was found instead, and the panel's
+status line says so in words — `Liquipedia link for Bebop was a tournament
+page, ignored`. The bad URL is also dropped from the cache, or every future run
+would repeat the mistake. A page whose kind cannot be determined at all is
+allowed through, so an unusual-but-real team page is never thrown away on a
+hunch.
+
+Teams that genuinely have no Liquipedia page — which is most of the field in an
+open qualifier — land in the same place they always did: `no Liquipedia page
+for X`, and a thread built from HLTV alone.
 
 ## Details worth knowing
 

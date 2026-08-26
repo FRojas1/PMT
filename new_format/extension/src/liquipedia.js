@@ -20,6 +20,11 @@ function lpFlag(img) {
   return m ? m[1].toUpperCase() : '';
 }
 
+function lpPageTitle(doc) {
+  return lpText(doc.querySelector('#firstHeading')) ||
+    lpText(doc.querySelector('.fo-nttax-infobox .infobox-header')).replace(/^\[e\]\[h\]/, '').trim();
+}
+
 // The infobox social links are tagged by an <i class="lp-icon lp-twitter"> etc.
 // Rendered in this order, at most one per network, skipping absent ones.
 var LINK_ORDER = [
@@ -55,6 +60,82 @@ function infoboxLinks(doc) {
     if (byKind[pair[0]]) { out.push({ label: pair[1], url: byKind[pair[0]] }); delete byKind[pair[0]]; }
   });
   return out;
+}
+
+/* ----------------------------------------------------- what page is this? */
+
+/*
+ * A search can hand back a page that is not the thing that was asked for, and
+ * the parsers will not complain: a tournament page has an infobox with social
+ * links in it and a name in its header, so `Bebop` resolving to European Pro
+ * League Series 6 Play-In produced a thread listing that tournament as one of
+ * the teams, wearing the tournament's Twitter and Twitch. It renders perfectly.
+ * It is just wrong, which is the failure mode worth spending code on.
+ *
+ * Liquipedia says what every page is, at the bottom, in its categories: team
+ * pages are filed under `Teams` (plus `Russian Teams`, `CS2 Teams`), tournament
+ * pages under `Tournaments`, players under `Players`. Note that a tournament is
+ * also filed under `Team Tournaments` - matching the *end* of the category is
+ * what keeps that from reading as a team.
+ */
+function pageCategories(doc) {
+  var box = doc.querySelector('#catlinks');
+  if (!box) return [];
+  return Array.prototype.map.call(box.querySelectorAll('a'), function (a) {
+    return (a.textContent || '').replace(/\s+/g, ' ').trim();
+  }).filter(function (t) { return t && !/^Categor(y|ies)$/i.test(t); });
+}
+
+// Tournament first: `Team Tournaments` must not be read as a team.
+var KIND_BY_CATEGORY = [
+  ['tournament', /Tournaments$/],
+  ['team', /Teams$/],
+  ['player', /Players$/],
+  ['organisation', /(Organizers|Organisations)$/]
+];
+
+// A page with its categories stripped can still be identified from the shape of
+// its infobox, which differs completely between the two: a team is described by
+// who runs it and what it has won, a tournament by when it is and what it pays.
+function infoboxLabelText(doc) {
+  var box = doc.querySelector('.fo-nttax-infobox');
+  if (!box) return '';
+  return Array.prototype.map.call(
+    box.querySelectorAll('.infobox-cell-2:first-child, .infobox-description'),
+    function (d) { return (d.textContent || '').replace(/\s+/g, ' ').trim(); }
+  ).join(' | ');
+}
+
+function hasSquadTable(doc) {
+  var tables = doc.querySelectorAll('.table2__table');
+  for (var i = 0; i < tables.length; i++) {
+    if (/^ID/.test(lpText(tables[i].querySelector('tr.table2__row--head')))) return true;
+  }
+  return false;
+}
+
+function liquipediaPageKind(doc) {
+  if (!doc) return 'unknown';
+  var cats = pageCategories(doc);
+  for (var i = 0; i < KIND_BY_CATEGORY.length; i++) {
+    for (var c = 0; c < cats.length; c++) {
+      if (KIND_BY_CATEGORY[i][1].test(cats[c])) return KIND_BY_CATEGORY[i][0];
+    }
+  }
+  var labels = infoboxLabelText(doc);
+  if (/Prize Pool|Liquipedia Tier|Start Date|Organizers?:/i.test(labels)) return 'tournament';
+  if (/Total Winnings|In-Game Leader|Founders?:/i.test(labels) || hasSquadTable(doc)) return 'team';
+  return 'unknown';
+}
+
+// What the run log and the panel note should call it. Reads in both directions:
+// a team slot can land on a tournament, and an event slot on a team.
+function describeKind(kind) {
+  if (kind === 'tournament') return 'a tournament page';
+  if (kind === 'team') return 'a team page';
+  if (kind === 'player') return 'a player page';
+  if (kind === 'organisation') return 'an organisation page';
+  return 'the wrong kind of page';
 }
 
 // A one-line summary of what a team page yielded, for the run log.
@@ -352,6 +433,8 @@ function nextRound(doc, teamNames, scores) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     parseTeamPage: parseTeamPage, parseStreams: parseStreams, teamSummary: teamSummary,
-    nextRound: nextRound, prettyRound: prettyRound, infoboxLinks: infoboxLinks, lpFlag: lpFlag
+    nextRound: nextRound, prettyRound: prettyRound, infoboxLinks: infoboxLinks, lpFlag: lpFlag,
+    liquipediaPageKind: liquipediaPageKind, pageCategories: pageCategories,
+    describeKind: describeKind, lpPageTitle: lpPageTitle
   };
 }
