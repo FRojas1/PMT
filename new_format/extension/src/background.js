@@ -12,9 +12,13 @@
  * A tab is a real browser: it has the cookies, it runs the JavaScript, and it
  * looks like the user because it is the user. So searches are performed by
  * navigating a background tab, and page contents are read from inside it. One
- * tab is opened lazily, shared across a run, and closed when the run goes idle;
- * if the user already has a Liquipedia tab open, that one is borrowed and left
- * alone.
+ * tab is opened lazily, shared across a run, and closed once the run has been
+ * idle for a few seconds; if the user already has a Liquipedia tab open, that
+ * one is borrowed and left alone. The idle delay is load-bearing: tab work is
+ * serialised, so the outstanding-operation count hits zero between every fetch,
+ * and closing at that instant races the next acquire against tabs.remove. The
+ * dying tab still matches `liquipedia.net/*`, the next read inherits its id,
+ * and twenty seconds later extractHtml dies with "No tab with id".
  *
  * The only fetch still attempted directly is a Liquipedia page - it is much
  * faster when the cookie happens to travel, and it falls back to the tab the
@@ -77,9 +81,15 @@ function excerptOf(text) {
 /* ------------------------------------------------------------- the tab */
 
 var tab = null;          // { id, ours }
-var tabUsers = 0;        // outstanding operations; the tab closes at zero
+var tabUsers = 0;        // outstanding operations
+var closeTimer = null;
+var TAB_IDLE_MS = 10000; // close our tab once the run has gone quiet
 var queue = Promise.resolve();
 var lastSearchAt = 0;
+
+function isMissingTabError(e) {
+  return /No tab with id/i.test(String((e && e.message) || e || ''));
+}
 
 // Everything that touches the tab is serialised: one navigation at a time, and
 // searches spaced out so they look like a person typing rather than a script.
@@ -89,54 +99,139 @@ function enqueue(fn) {
   return run;
 }
 
-function waitForComplete(tabId) {
+function forgetTab(id) {
+  if (tab && (id == null || tab.id === id)) tab = null;
+}
+
+chrome.tabs.onRemoved.addListener(function (id) { forgetTab(id); });
+
+function tabStillOpen(tabId) {
   return new Promise(function (resolve) {
-    var settled = false;
-    function finish() {
-      if (settled) return;
-      settled = true;
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      clearTimeout(timer);
-      resolve();
-    }
-    function onUpdated(id, info) { if (id === tabId && info.status === 'complete') finish(); }
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    var timer = setTimeout(finish, 20000);
     chrome.tabs.get(tabId, function (t) {
-      if (!chrome.runtime.lastError && t && t.status === 'complete') finish();
+      resolve(!chrome.runtime.lastError && !!t);
+    });
+  });
+}
+
+function createOurTab(resolve, reject) {
+  chrome.tabs.create({ url: 'about:blank', active: false }, function (created) {
+    if (chrome.runtime.lastError || !created) {
+      return reject(new Error(chrome.runtime.lastError
+        ? chrome.runtime.lastError.message
+        : 'could not open a background tab'));
+    }
+    tab = { id: created.id, ours: true };
+    resolve(tab);
+  });
+}
+
+function openOrBorrowTab() {
+  return new Promise(function (resolve, reject) {
+    chrome.tabs.query({ url: 'https://liquipedia.net/*' }, function (tabs) {
+      if (tabs && tabs.length) {
+        // a just-closed tab still matches this query for a moment; using that
+        // id is how a team read died with "No tab with id" after the event
+        // page had already been read and the shared tab torn down
+        return tabStillOpen(tabs[0].id).then(function (open) {
+          if (open) {
+            tab = { id: tabs[0].id, ours: false };
+            return resolve(tab);
+          }
+          createOurTab(resolve, reject);
+        });
+      }
+      createOurTab(resolve, reject);
     });
   });
 }
 
 function acquireTab() {
   tabUsers++;
-  if (tab) return Promise.resolve(tab);
-  return new Promise(function (resolve) {
-    chrome.tabs.query({ url: 'https://liquipedia.net/*' }, function (tabs) {
-      if (tabs && tabs.length) { tab = { id: tabs[0].id, ours: false }; return resolve(tab); }
-      chrome.tabs.create({ url: 'about:blank', active: false }, function (created) {
-        tab = { id: created.id, ours: true };
-        resolve(tab);
-      });
+  if (closeTimer) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+  if (tab) {
+    return tabStillOpen(tab.id).then(function (open) {
+      if (open) return tab;
+      tab = null;
+      return openOrBorrowTab();
     });
-  });
+  }
+  return openOrBorrowTab();
 }
 
 function releaseTab() {
   tabUsers--;
   if (tabUsers > 0 || !tab) return;
-  var t = tab;
-  tab = null;
-  if (t.ours) chrome.tabs.remove(t.id, function () { void chrome.runtime.lastError; });
+  // Do not close here. The queue runs one fetch at a time, so this count is
+  // zero between the event page and each team page; closing then hands the
+  // next read a dying id. Keep the handle (and the clearance cookie the tab
+  // just earned) and only tear our tab down once the run has gone idle.
+  if (!tab.ours) return;
+  closeTimer = setTimeout(function () {
+    closeTimer = null;
+    if (tabUsers > 0 || !tab || !tab.ours) return;
+    var id = tab.id;
+    chrome.tabs.remove(id, function () {
+      void chrome.runtime.lastError;
+      forgetTab(id);
+    });
+  }, TAB_IDLE_MS);
 }
 
+function runWithTab(work) {
+  return acquireTab()
+    .then(work)
+    .then(function (res) { releaseTab(); return res; },
+          function (e) { releaseTab(); throw e; });
+}
+
+// Navigate and wait for the *new* load to finish. The previous helper treated
+// the tab's current "complete" as success, which is the page we are leaving
+// whenever the shared tab is reused.
 function navigate(tabId, url) {
-  return new Promise(function (resolve) {
-    chrome.tabs.update(tabId, { url: url }, function () {
-      void chrome.runtime.lastError;
-      resolve();
+  return new Promise(function (resolve, reject) {
+    var settled = false;
+    var seenLoading = false;
+    function finish(err) {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve();
+    }
+    function onUpdated(id, info) {
+      if (id !== tabId) return;
+      if (info.status === 'loading') seenLoading = true;
+      if (info.status === 'complete' && seenLoading) finish();
+    }
+    function onRemoved(id) {
+      if (id === tabId) finish(new Error('No tab with id: ' + tabId));
+    }
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    var timer = setTimeout(function () { finish(); }, 20000);
+    chrome.tabs.update(tabId, { url: url }, function (t) {
+      if (chrome.runtime.lastError) {
+        return finish(new Error(chrome.runtime.lastError.message));
+      }
+      if (t && t.status === 'loading') seenLoading = true;
+      // already on this URL (or the update was a no-op): nothing will load
+      if (t && t.status === 'complete' && samePage(t.url, url)) finish();
     });
-  }).then(function () { return waitForComplete(tabId); });
+  });
+}
+
+function samePage(actual, wanted) {
+  if (!actual || !wanted) return false;
+  try {
+    return new URL(actual).href === new URL(wanted).href;
+  } catch (e) {
+    return actual === wanted;
+  }
 }
 
 function runInTab(tabId, func, args) {
@@ -148,7 +243,10 @@ function runInTab(tabId, func, args) {
 }
 
 function tabOrigin(tabId) {
-  return runInTab(tabId, function () { return location.origin; }).catch(function () { return ''; });
+  return runInTab(tabId, function () { return location.origin; }).catch(function (e) {
+    if (isMissingTabError(e)) throw e;
+    return '';
+  });
 }
 
 /* --------------------------------------------------------------- extractors
@@ -339,7 +437,10 @@ function askEngine(tabId, engine, query, kind, trace) {
       // a challenge page is a different origin, and injection there is refused
       return runInTab(tabId, extractResultLinks).then(
         function (page) { return { landed: landed, page: page }; },
-        function (e) { return { landed: landed, page: null, error: String(e.message || e) }; }
+        function (e) {
+          if (isMissingTabError(e)) throw e;
+          return { landed: landed, page: null, error: String(e.message || e) };
+        }
       );
     })
     .then(function (got) {
@@ -357,33 +458,38 @@ function askEngine(tabId, engine, query, kind, trace) {
       });
       return url;
     }, function (e) {
+      if (isMissingTabError(e)) throw e;
       trace.push({ step: engine.name, error: String(e.message || e) });
       return '';
     });
+}
+
+function searchEngines(tabId, query, kind, trace) {
+  // each engine in turn, stopping at the first that answers - a second
+  // engine is only ever asked when the first came back empty or blocked
+  return SEARCH_ENGINES.reduce(function (chain, engine) {
+    return chain.then(function (found) {
+      if (found && found.url) return found;
+      return askEngine(tabId, engine, query, kind, trace).then(function (url) {
+        return { url: url, via: engine.name + '-tab' };
+      });
+    });
+  }, Promise.resolve(null));
 }
 
 function searchInTab(kind, name) {
   var query = searchQueryFor(name);
   var trace = [];
   return enqueue(function () {
-    return acquireTab()
-      .then(function (t) {
-        // each engine in turn, stopping at the first that answers - a second
-        // engine is only ever asked when the first came back empty or blocked
-        return SEARCH_ENGINES.reduce(function (chain, engine) {
-          return chain.then(function (found) {
-            if (found && found.url) return found;
-            return askEngine(t.id, engine, query, kind, trace).then(function (url) {
-              return { url: url, via: engine.name + '-tab' };
-            });
-          });
-        }, Promise.resolve(null));
+    return runWithTab(function (t) { return searchEngines(t.id, query, kind, trace); })
+      .catch(function (e) {
+        if (!isMissingTabError(e)) throw e;
+        forgetTab();
+        return runWithTab(function (t) { return searchEngines(t.id, query, kind, trace); });
       })
       .then(function (res) {
-        releaseTab();
         return { url: res.url, via: res.url ? res.via : 'none', trace: trace };
       }, function (e) {
-        releaseTab();
         return { url: '', via: 'error', error: String(e.message || e), trace: trace };
       });
   });
@@ -455,6 +561,36 @@ function fetchInTab(tabId, url, t0) {
   });
 }
 
+function readViaTab(t, url, t0) {
+  return tabOrigin(t.id).then(function (origin) {
+    // already somewhere on liquipedia.net: try the cheap same-origin fetch
+    // first, and navigate only if it comes back with something else
+    var quick = origin === 'https://liquipedia.net'
+      ? fetchInTab(t.id, url, t0).catch(function (e) {
+          if (isMissingTabError(e)) throw e;
+          return null;
+        })
+      : Promise.resolve(null);
+    return quick.then(function (r) {
+      if (r && r.ok) return r;
+      return navigateInTab(t.id, url, t0).then(function (viaNav) {
+        // `retriedAfter` belongs to the worker fetch that got us here, so
+        // the rung skipped inside the tab is reported under its own name
+        if (r) {
+          viaNav.afterTabFetch = { status: r.status, bytes: r.bytes,
+                                   intercepted: r.intercepted, error: r.error };
+        }
+        return viaNav;
+      });
+    });
+  });
+}
+
+function tabFetchFailed(url, t0, e) {
+  return { ok: false, status: 0, url: url, via: 'tab', ms: Date.now() - t0,
+           error: String((e && e.message) || e) };
+}
+
 // The last rung: the tab goes to the page itself. Nothing here is a fetch, an
 // XHR or an extension - it is a browser loading a URL, which is the request
 // every one of these defences is built to let through.
@@ -475,32 +611,15 @@ function navigateInTab(tabId, url, t0) {
 function fetchPageInTab(url) {
   var t0 = Date.now();
   return enqueue(function () {
-    return acquireTab().then(function (t) {
-      return tabOrigin(t.id).then(function (origin) {
-        // already somewhere on liquipedia.net: try the cheap same-origin fetch
-        // first, and navigate only if it comes back with something else
-        var quick = origin === 'https://liquipedia.net'
-          ? fetchInTab(t.id, url, t0).catch(function () { return null; })
-          : Promise.resolve(null);
-        return quick.then(function (r) {
-          if (r && r.ok) return r;
-          return navigateInTab(t.id, url, t0).then(function (viaNav) {
-            // `retriedAfter` belongs to the worker fetch that got us here, so
-            // the rung skipped inside the tab is reported under its own name
-            if (r) {
-              viaNav.afterTabFetch = { status: r.status, bytes: r.bytes,
-                                       intercepted: r.intercepted, error: r.error };
-            }
-            return viaNav;
-          });
-        });
+    return runWithTab(function (t) { return readViaTab(t, url, t0); })
+      .catch(function (e) {
+        if (!isMissingTabError(e)) return tabFetchFailed(url, t0, e);
+        // the tab we were using vanished (closed mid-flight, or we inherited
+        // an id that was already gone). try once more with a fresh tab.
+        forgetTab();
+        return runWithTab(function (t) { return readViaTab(t, url, t0); })
+          .catch(function (e2) { return tabFetchFailed(url, t0, e2); });
       });
-    }).then(function (res) { releaseTab(); return res; },
-            function (e) {
-              releaseTab();
-              return { ok: false, status: 0, url: url, via: 'tab', ms: Date.now() - t0,
-                       error: String(e.message || e) };
-            });
   });
 }
 
