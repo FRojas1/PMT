@@ -240,17 +240,21 @@ treating every label as staff dropped OG's two loaned-in players, who had just
 played the match. Coaches are pulled from the same column by name.
 
 **Links reddit will not have.** r/GlobalOffensive's spam filter autoremoves a
-post that links to Russian social media or Telegram, and it removes the *whole*
-thread over one link — a CIS team's infobox routinely carries two or three, so
-Spirit's thread would never have survived its own Team Information line. Any
-link on a `.ru` domain, on `vk.com` / `vk.cc` / `vkplay.live`, or on `t.me` /
-`telegram.me` / `telegram.org` is dropped before it reaches the body.
+post that links to Russian social media, Telegram or Discord, and it removes the
+*whole* thread over one link — a CIS team's infobox routinely carries three, so
+Spirit's thread would never have survived its own Team Information line. Those
+links are dropped before they reach the body; everything else on the line keeps
+its order, and the run log names what went.
 
-The test is the host, not Liquipedia's `lp-vk` / `lp-telegram` icon, because the
-blocked link is as often the Official Site as it is the VK one. `.ru` covers
-vk.ru, vkvideo.ru, ok.ru and rutube.ru without naming them; only the networks
-sitting on other TLDs are listed. Nothing else about the line changes — the
-remaining links keep their order, and the run log names what went.
+Two rules decide, because neither signal covers the other's ground. A link is
+dropped if Liquipedia tagged it `lp-vk`, `lp-telegram` or `lp-discord` — the
+icon is what catches a Discord invite behind a vanity redirect like `dsc.gg` or
+a team's own subdomain. It is also dropped on its host: any `.ru` domain, or
+`vk.com` / `vk.cc` / `vkplay.live` / `t.me` / `telegram.me` / `telegram.org` /
+`discord.gg` / `discord.com`. That half is what catches the link no icon marks
+— a blocked link is as often the Official Site as it is the VK one. `.ru` as a
+rule covers vk.ru, vkvideo.ru, ok.ru and rutube.ru without naming them, so only
+the networks sitting on other TLDs are listed.
 
 **Bracket.** The match is found by team names plus score; its parent match gives
 both the round name and the opponent.

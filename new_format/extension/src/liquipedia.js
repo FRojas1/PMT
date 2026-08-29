@@ -41,19 +41,24 @@ var LINK_ORDER = [
  * Links reddit will not have.
  *
  * r/GlobalOffensive's spam filter autoremoves posts linking to Russian social
- * media or Telegram, and it takes down the whole thread over one of them - a
- * CIS team's infobox routinely carries two or three. They are dropped here, at
- * the one place a third-party URL can enter the body.
+ * media, Telegram or Discord, and it takes down the whole thread over one of
+ * them - a CIS team's infobox routinely carries three. They are dropped here,
+ * at the one place a third-party URL can enter the body.
  *
- * Matched on the host rather than on the `lp-vk` / `lp-telegram` icon, because
- * the blocked link is as often the Official Site as it is the VK one. `.ru` is
- * the rule, and it already covers vk.ru, vkvideo.ru, ok.ru, rutube.ru and the
- * rest; only the networks sitting on other TLDs have to be named.
+ * Two rules, because neither signal covers the other's ground. The icon
+ * Liquipedia tags a link with says which network it is, and that is what
+ * catches a Discord invite behind a vanity redirect. The host catches what the
+ * icon cannot: a blocked link is as often the Official Site as it is the VK
+ * one. `.ru` as a rule already covers vk.ru, vkvideo.ru, ok.ru and rutube.ru
+ * without naming them, so only the networks sitting on other TLDs are listed.
  */
-var BLOCKED_LINK_HOST =
-  /(^|\.)(vk\.(com|cc)|vkplay\.live|t\.me|telegram\.(me|org|dog))$|\.ru$/i;
+var BLOCKED_LINK_KIND = { vk: 1, telegram: 1, discord: 1 };
 
-function isBlockedLink(url) {
+var BLOCKED_LINK_HOST =
+  /(^|\.)(vk\.(com|cc)|vkplay\.live|t\.me|telegram\.(me|org|dog)|discord(app)?\.(gg|com|me)|dsc\.gg)$|\.ru$/i;
+
+function isBlockedLink(kind, url) {
+  if (BLOCKED_LINK_KIND[kind]) return true;
   try {
     return BLOCKED_LINK_HOST.test(new URL(url, 'https://liquipedia.net').hostname);
   } catch (e) {
@@ -84,7 +89,7 @@ function infoboxLinks(doc) {
     var href = byKind[pair[0]];
     if (!href) return;
     delete byKind[pair[0]];
-    if (isBlockedLink(href)) blocked.push(pair[1]);
+    if (isBlockedLink(pair[0], href)) blocked.push(pair[1]);
     else out.push({ label: pair[1], url: href });
   });
   // what was dropped, for the run log to name it; the links are the return
