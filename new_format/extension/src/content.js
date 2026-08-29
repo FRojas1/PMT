@@ -192,24 +192,60 @@ function readEventPage(doc) {
     setting.flag = setting.flag.toUpperCase();
   }
 
-  // Liquipedia and HLTV disagree about org suffixes - the bracket says "FUT
-  // Esports" where HLTV says "FUT" - so the directory is indexed on the name
-  // with those suffixes stripped as well as verbatim.
+  return { setting: setting, directory: readTeamDirectory(doc) };
+}
+
+// A flag sitting next to a /team/ link. The old event-page markup had the img
+// as the previous sibling; current pages wrap the name, so we also look a few
+// ancestors up. The match page itself lists other event teams (related results)
+// and is merged in so a 3-team event-page directory is not the only source.
+function flagImgNear(el) {
+  var prev = el.previousElementSibling;
+  if (prev && prev.tagName === 'IMG' && /\/flags\//.test(prev.getAttribute('src') || '')) {
+    return prev;
+  }
+  var n = el.parentElement;
+  for (var up = 0; up < 3 && n; up++) {
+    var img = n.querySelector('img.flag, img[src*="/flags/"]');
+    if (img && /\/flags\//.test(img.getAttribute('src') || '')) return img;
+    n = n.parentElement;
+  }
+  return null;
+}
+
+function addDirectoryEntry(directory, name, img, url) {
+  name = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!name || directory[name] || !img) return;
+  var src = img.getAttribute('src') || '';
+  var flag = ((src.match(/\/flags\/[^/]*\/([A-Za-z_-]+)\./) || [])[1] || '').toUpperCase();
+  if (!flag) return;
+  directory[name] = { flag: flag, url: url || '' };
+}
+
+function readTeamDirectory(doc) {
   var directory = {};
   Array.prototype.forEach.call(doc.querySelectorAll('a[href*="/team/"]'), function (a) {
-    var name = a.textContent.replace(/\s+/g, ' ').trim();
-    if (!name || directory[name]) return;
-    var prev = a.previousElementSibling;
-    var img = (prev && prev.tagName === 'IMG' && /flags\//.test(prev.getAttribute('src') || ''))
-      ? prev
-      : (a.parentElement && a.parentElement.querySelector('img.flag'));
-    if (!img || !/flags\//.test(img.getAttribute('src') || '')) return;
-    directory[name] = {
-      flag: ((img.getAttribute('src').match(/\/flags\/[^/]*\/([A-Za-z_-]+)\./) || [])[1] || '').toUpperCase(),
-      url: a.getAttribute('href')
-    };
+    addDirectoryEntry(directory, a.textContent, flagImgNear(a), a.getAttribute('href'));
   });
-  return { setting: setting, directory: directory };
+  // Upcoming/related match boxes list teams as a flag + span.team, with no
+  // /team/ link. That is how Falcons (and most of the rest of the event) show
+  // up on this match page at all.
+  Array.prototype.forEach.call(doc.querySelectorAll('.teamrow'), function (row) {
+    var span = row.querySelector('.team');
+    var img = row.querySelector('img.flag, img[src*="/flags/"]');
+    addDirectoryEntry(directory, span && span.textContent, img, '');
+  });
+  return directory;
+}
+
+function mergeDirectory(a, b) {
+  var out = {};
+  [a, b].forEach(function (dir) {
+    Object.keys(dir || {}).forEach(function (k) {
+      if (!out[k]) out[k] = dir[k];
+    });
+  });
+  return out;
 }
 
 var ORG_WORDS = ['esports', 'esport', 'gaming', 'team', 'club'];
@@ -596,24 +632,32 @@ function generate(opts) {
         });
       }
 
-      var opponentTag = '';
-      if (next) {
-        var opp = lookupTeam(ev && ev.directory, next.opponent);
-        if (opp) {
-          // HLTV's spelling is the one the subreddit flair table is keyed on
-          opponentTag = '[' + flagEmoji(opp.flag) + '](' +
-            teamAnchor(opp.name, opp.flag, settings.logoOverrides) + ')';
-          if (opp.name !== next.opponent) {
-            PMTLog.info('next opponent matched under a different name',
-              { liquipedia: next.opponent, hltv: opp.name });
+      var directory = mergeDirectory(ev && ev.directory, readTeamDirectory(document));
+      PMTLog.info('team directory', {
+        eventPage: ev ? Object.keys(ev.directory).length : 0,
+        withMatchPage: Object.keys(directory).length
+      });
+
+      var tagOpponents = function (list) {
+        return (list || []).map(function (name) {
+          var opp = lookupTeam(directory, name);
+          var namesForTag = [name];
+          if (opp) namesForTag.push(opp.name);
+          // logo from the flair table (any spelling), flag from HLTV when we have it
+          var tag = teamTag(namesForTag, opp && opp.flag, settings.logoOverrides);
+          if (tag) {
+            if (opp && opp.name !== name) {
+              PMTLog.info('next opponent matched under a different name',
+                { liquipedia: name, hltv: opp.name });
+            }
+          } else {
+            PMTLog.warn('next opponent has no flag or logo flair', { opponent: name });
           }
-        } else {
-          PMTLog.warn('next opponent not in the HLTV event directory - rendering without a flag', {
-            opponent: next.opponent,
-            directorySample: ev ? Object.keys(ev.directory).slice(0, 12) : null
-          });
-        }
-      }
+          return { name: name, tag: tag };
+        });
+      };
+      if (next && next.advance) next.advance.opponents = tagOpponents(next.advance.opponents);
+      if (next && next.drop) next.drop.opponents = tagOpponents(next.drop.opponents);
 
       PMTLog.info('liquipedia summary', {
         event: lpe && lpe.url,
@@ -633,7 +677,6 @@ function generate(opts) {
         lpEventUrl: lpe && lpe.url,
         streams: lpe ? parseStreams(lpe.doc) : [],
         next: next,
-        opponentTag: opponentTag,
         setting: ev && ev.setting,
         overtimes: overtimes,
         highlights: highlights,

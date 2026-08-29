@@ -383,25 +383,60 @@ function roundNameFor(match, bracket) {
   return names[col] || '';
 }
 
+function firstCenterMatch(node) {
+  if (!node) return null;
+  var center = Array.prototype.filter.call(node.children, function (c) {
+    return c.classList.contains('brkts-round-center');
+  })[0];
+  return center ? center.querySelector(':scope > .brkts-match') : null;
+}
+
 function parentMatch(match) {
   var center = match.closest('.brkts-round-center');
   var body = center && center.parentElement;
   var lower = body && body.parentElement;
   if (!lower || !lower.classList.contains('brkts-round-lower')) return null;
-  var parentBody = lower.parentElement;
-  if (!parentBody) return null;
-  var parentCenter = Array.prototype.filter.call(parentBody.children, function (c) {
-    return c.classList.contains('brkts-round-center');
-  })[0];
-  return parentCenter ? parentCenter.querySelector(':scope > .brkts-match') : null;
+  return firstCenterMatch(lower.parentElement);
 }
 
-// "Semifinals" -> "Semi Finals", "Upper Bracket Semifinals" -> "Upper Bracket
-// Semi Finals". "Grand Final" and "Round of 16" are left alone.
-function prettyRound(name) {
-  return String(name || '').replace(/(quarter|semi)\s*-?\s*finals?/gi, function (all, word) {
-    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase() + ' Finals';
+// Immediate feeder matches: the round-bodies sitting under this match's own
+// .brkts-round-lower. That is how a TBA slot in the parent is turned back into
+// the two teams still playing for it.
+function childMatches(match) {
+  var center = match.closest('.brkts-round-center');
+  var body = center && center.parentElement;
+  if (!body) return [];
+  var out = [];
+  Array.prototype.forEach.call(body.children, function (c) {
+    if (!c.classList.contains('brkts-round-lower')) return;
+    Array.prototype.forEach.call(c.children, function (kid) {
+      if (!kid.classList.contains('brkts-round-body')) return;
+      var m = firstCenterMatch(kid);
+      if (m) out.push(m);
+    });
   });
+  return out;
+}
+
+function sectionKind(match, bracket) {
+  var names = headerNames(sectionHeader(match, bracket));
+  for (var i = 0; i < names.length; i++) {
+    if (/lower/i.test(names[i])) return 'lower';
+    if (/upper/i.test(names[i])) return 'upper';
+  }
+  return '';
+}
+
+// "Semifinals" -> "Semi Finals", "Upper Bracket Final" -> "Upper Final".
+// "Grand Final" and "Round of 16" are left alone.
+function prettyRound(name) {
+  return String(name || '')
+    .replace(/\s+Bracket\s+/i, ' ')
+    .replace(/(quarter|semi)\s*-?\s*finals?/gi, function (all, word) {
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase() + ' Finals';
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 var ORG_WORDS = ['esports', 'esport', 'gaming', 'team', 'club'];
@@ -432,13 +467,67 @@ function nameMatches(entryNames, candidates) {
   return false;
 }
 
+function winningEntry(entries, wantScores) {
+  var marked = entries.filter(function (e) { return e.won; })[0];
+  if (marked) return marked;
+  var hi = Math.max(Number(wantScores[0]), Number(wantScores[1]));
+  if (!isFinite(hi) || hi <= 0) return null;
+  return entries.filter(function (e) { return Number(e.score) === hi; })[0] || null;
+}
+
+function opponentNames(entries) {
+  var out = [];
+  (entries || []).forEach(function (e) {
+    var n = e.names && e.names[0];
+    if (!n) return;
+    if (out.some(function (x) { return nameMatches([x], e.names); })) return;
+    out.push(n);
+  });
+  return out.sort(function (a, b) { return a.localeCompare(b); });
+}
+
+// Who a team will face in `match`. A named slot is used as-is; a TBA slot is
+// expanded to the teams still playing in the feeder that is not `exceptMatch`.
+function facingTeams(match, exceptNames, exceptMatch) {
+  var named = matchEntries(match).filter(function (e) {
+    return e.names.length && !nameMatches(e.names, exceptNames);
+  });
+  if (named.length) return named;
+  var out = [];
+  childMatches(match).forEach(function (k) {
+    if (k === exceptMatch) return;
+    var kids = matchEntries(k).filter(function (e) { return e.names.length; });
+    if (kids.some(function (e) { return nameMatches(e.names, exceptNames); })) return;
+    if (kids.length) {
+      kids.forEach(function (e) { out.push(e); });
+      return;
+    }
+    facingTeams(k, exceptNames, exceptMatch).forEach(function (e) { out.push(e); });
+  });
+  return out;
+}
+
+function upcomingFor(bracket, teamNames, except) {
+  var matches = bracket.querySelectorAll('.brkts-match');
+  for (var i = 0; i < matches.length; i++) {
+    if (matches[i] === except) continue;
+    var entries = matchEntries(matches[i]);
+    if (!entries.some(function (e) { return nameMatches(e.names, teamNames); })) continue;
+    if (entries.some(function (e) { return e.won; })) continue;
+    return matches[i];
+  }
+  return null;
+}
+
 /*
- * Finds this match in the event's brackets and reports what the winner plays
- * next. `teamNames` is [[names for team1], [names for team2]] - HLTV's name and
- * the Liquipedia one, since the bracket may use either.
+ * Finds this match in the event's brackets and reports what happens next.
+ * `teamNames` is [[names for team1], [names for team2]] - HLTV's name and the
+ * Liquipedia one, since the bracket may use either.
  *
- * Returns {round, opponent} or null when the match is not in a bracket (group
- * stages), is the final, or the next opponent is not decided yet.
+ * Returns { advance, drop } or null. `advance` is the winner's next round, and
+ * `drop` is the loser's landing in the opposite section (upper → lower). Either
+ * side may list two opponents when that slot is still being played for - that
+ * used to be treated as "not decided" and the whole line was dropped.
  */
 function nextRound(doc, teamNames, scores) {
   var brackets = doc.querySelectorAll('.brkts-bracket');
@@ -452,17 +541,43 @@ function nextRound(doc, teamNames, scores) {
       var flipped = nameMatches(entries[0].names, teamNames[1]) && nameMatches(entries[1].names, teamNames[0]);
       if (!a && !flipped) continue;
       var want = flipped ? [scores[1], scores[0]] : scores;
-      if (String(entries[0].score) !== String(want[0]) || String(entries[1].score) !== String(want[1])) continue;
+      var scored = entries[0].score !== '' || entries[1].score !== '';
+      if (scored &&
+          (String(entries[0].score) !== String(want[0]) ||
+           String(entries[1].score) !== String(want[1]))) {
+        continue;
+      }
+
+      var winner = winningEntry(entries, want);
+      var loser = winner
+        ? entries.filter(function (e) { return e !== winner; })[0]
+        : null;
+      var result = {};
 
       var parent = parentMatch(matches[m]);
-      if (!parent) return null;
-      var round = roundNameFor(parent, bracket);
-      var winner = entries.filter(function (e) { return e.won; })[0];
-      var opponent = matchEntries(parent).filter(function (e) {
-        return !winner || !nameMatches(e.names, winner.names);
-      })[0];
-      if (!opponent || !opponent.names.length) return null;
-      return { round: prettyRound(round), opponent: opponent.names[0] };
+      if (parent && winner) {
+        var round = prettyRound(roundNameFor(parent, bracket));
+        if (round && !/^qualif/i.test(round)) {
+          result.advance = {
+            round: round,
+            opponents: opponentNames(facingTeams(parent, winner.names, matches[m]))
+          };
+        }
+      }
+
+      if (loser && sectionKind(matches[m], bracket) === 'upper') {
+        var dropMatch = upcomingFor(bracket, loser.names.concat(flipped ? teamNames[0] : teamNames[1]),
+                                    matches[m]);
+        if (dropMatch && sectionKind(dropMatch, bracket) === 'lower') {
+          result.drop = {
+            dest: 'the Lower bracket',
+            opponents: opponentNames(facingTeams(dropMatch, loser.names, matches[m]))
+          };
+        }
+      }
+
+      if (result.advance || result.drop) return result;
+      return null;
     }
   }
   return null;

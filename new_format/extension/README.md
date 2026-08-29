@@ -256,8 +256,15 @@ a team's own subdomain. It is also dropped on its host: any `.ru` domain, or
 rule covers vk.ru, vkvideo.ru, ok.ru and rutube.ru without naming them, so only
 the networks sitting on other TLDs are listed.
 
-**Bracket.** The match is found by team names plus score; its parent match gives
-both the round name and the opponent.
+**Bracket.** The match is found by team names plus score. The winner's parent
+match is the next round; the loser's next unplayed slot in the other section is
+the drop. Either slot may still be TBA — the two teams playing for it are read
+from the feeder matches under that slot, and printed as `A or B` rather than
+dropping the line.
+
+Round names lose the word "Bracket" (`Upper Bracket Final` → `Upper Final`). A
+loss in the upper bracket is `drop to the Lower bracket`, not the specific
+lower-round title.
 
 Finding the round name is the fiddly part, because a bracket is not one column
 list. A double-elimination group is rendered as several *sections*, each with its
@@ -282,7 +289,9 @@ including when the Liquipedia team page failed to load and only HLTV's spelling
 is available.
 
 A section final (winning the upper bracket, say) has no parent match, so the
-"advances to" line is omitted rather than guessed at. Same for a grand final.
+advance line is omitted rather than guessed at. Same for a grand final. The
+loser of that section final can still get a drop line if they have already been
+placed in the lower bracket.
 
 **Team names.** The header and Team Information use Liquipedia's full name
 ("Team Vitality"); the VRS table, veto table and stats tables use HLTV's short
@@ -290,8 +299,8 @@ one ("Vitality"). That is what the sample does.
 
 ## Deviations from `../SampleBody.md`
 
-The renderer reproduces the sample line-for-line (215 lines) except for 36 lines
-in five deliberate categories:
+The renderer reproduces the sample line-for-line (215 lines) except for the
+deliberate differences below:
 
 | Difference | Why |
 |---|---|
@@ -301,6 +310,7 @@ in five deliberate categories:
 | a stray `\t ` line (1) | dropped; Maps 1 and 3 have a plain blank line there |
 | parenthesised asides stripped from highlights (6) | requested fix |
 | extra social links (2) | Liquipedia lists two networks it did not when the sample was made — Facebook for Vitality, Bilibili for Spirit |
+| `advances to the Semi Finals` → `advance to Semi Finals` | requested double-elim wording: plural verb, no "the", `A or B` when the next slot is TBA, and a drop line for the loser |
 
 The sample's `NaN` after Spirit's last link is gone.
 

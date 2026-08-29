@@ -45,11 +45,58 @@ function langAnchor(code) {
   return '#lang-' + (REGION_ANCHORS[c] || c.toLowerCase());
 }
 
+// Org words Liquipedia hangs on a name that the flair table does not:
+// "Team Falcons" and "FUT Esports" are stored as `falcons` and `fut`.
+var FLAIR_ORG_WORDS = ['esports', 'esport', 'gaming', 'team', 'club'];
+
+function flairNameCandidates(name) {
+  var raw = String(name || '').trim();
+  var out = [];
+  var add = function (s) {
+    if (s && out.indexOf(s) < 0) out.push(s);
+  };
+  add(raw);
+  var words = raw.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  add(words.join(' '));
+  add(words.filter(function (w) { return FLAIR_ORG_WORDS.indexOf(w) < 0; }).join(' '));
+  return out;
+}
+
+function teamFlairSlugFor(name, overrides) {
+  var cands = flairNameCandidates(name);
+  for (var i = 0; i < cands.length; i++) {
+    var slug = teamFlairSlug(cands[i], overrides);
+    if (slug) return slug;
+  }
+  return null;
+}
+
 // The anchor a team's flag emoji links to: its logo flair when the subreddit
-// has one, otherwise the team's country/region anchor.
+// has one, otherwise the team's country/region anchor. `name` may be one
+// spelling or several (HLTV + Liquipedia + shortname) - the first that hits
+// the flair table wins.
 function teamAnchor(name, flagCode, overrides) {
-  var slug = teamFlairSlug(name, overrides);
+  var names = Array.isArray(name) ? name : [name];
+  var slug = null;
+  for (var i = 0; i < names.length && !slug; i++) {
+    slug = teamFlairSlugFor(names[i], overrides);
+  }
   return slug ? '#' + slug + '-logo' : langAnchor(flagCode);
+}
+
+// `[🇧🇷](#legacy-logo) ` or `[🇪🇺](#lang-eu) ` or '' when we have neither a
+// flair nor a flag. Empty flag + a flair still prints (globe + logo) so a
+// team the event directory missed is not left as a bare name.
+function teamTag(name, flagCode, overrides) {
+  var names = (Array.isArray(name) ? name : [name]).filter(Boolean);
+  var slug = null;
+  for (var i = 0; i < names.length && !slug; i++) {
+    slug = teamFlairSlugFor(names[i], overrides);
+  }
+  var flag = flagCode || '';
+  if (!slug && !flag) return '';
+  return '[' + flagEmoji(flag) + '](' +
+    (slug ? '#' + slug + '-logo' : langAnchor(flag)) + ')';
 }
 
 function flagLink(code) {
@@ -525,7 +572,7 @@ if (typeof module !== 'undefined' && module.exports) {
     scrapeMatch: scrapeMatch, scrapeOvertimes: scrapeOvertimes, scrapeRoles: scrapeRoles,
     rolesFor: rolesFor, nickKey: nickKey,
     shortPrize: shortPrize, flagEmoji: flagEmoji, langAnchor: langAnchor,
-    teamAnchor: teamAnchor, flagLink: flagLink, titleCase: titleCase,
+    teamAnchor: teamAnchor, teamTag: teamTag, flagLink: flagLink, titleCase: titleCase,
     highlightTitle: highlightTitle, txt: txt, flagCodeFromImg: flagCodeFromImg
   };
 }

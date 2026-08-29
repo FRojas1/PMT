@@ -52,14 +52,35 @@ function headerBlock(d, ctx) {
   return lines.join('\n');
 }
 
-// "Team Spirit advances to the Semi Finals and will face Legacy"
+function formatOpponents(list) {
+  return (list || []).map(function (o) {
+    if (typeof o === 'string') return o;
+    return (o.tag ? o.tag + ' ' : '') + o.name;
+  }).join(' or ');
+}
+
+function resultLine(tag, name, verb, dest, opponents) {
+  var face = formatOpponents(opponents);
+  return '**' + tag + ' ' + name + ' ' + verb + ' ' + dest +
+    (face ? ' and will face ' + face : '') + '**  ';
+}
+
+// "MOUZ advance to Upper Final and will face Legacy or Team Falcons"
 function advanceLine(d, ctx) {
   var next = ctx.next;
   if (!next) return '';
   var wi = d.teams[0].won ? 0 : 1;
-  var opp = ctx.opponentTag ? ctx.opponentTag + ' ' : '';
-  return '**' + ctx.teamTag(wi) + ' ' + ctx.lpName(wi) +
-    ' advances to the ' + next.round + ' and will face ' + opp + next.opponent + '**  ';
+  var li = 1 - wi;
+  var lines = [];
+  if (next.advance && next.advance.round) {
+    lines.push(resultLine(ctx.teamTag(wi), ctx.lpName(wi), 'advance to',
+      next.advance.round, next.advance.opponents));
+  }
+  if (next.drop && next.drop.dest) {
+    lines.push(resultLine(ctx.teamTag(li), ctx.lpName(li), 'drop to',
+      next.drop.dest, next.drop.opponents));
+  }
+  return lines.join('\n\n');
 }
 
 function vrsBlock(d, ctx) {
@@ -229,7 +250,6 @@ function buildBody(d, extra) {
     lpEventUrl: extra.lpEventUrl || '',
     streams: extra.streams || [],
     next: extra.next || null,
-    opponentTag: extra.opponentTag || '',
     setting: extra.setting || null,
     overtimes: extra.overtimes || {},
     highlights: extra.highlights || null,
