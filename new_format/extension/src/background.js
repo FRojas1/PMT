@@ -1,10 +1,13 @@
 /*
  * background.js - all off-site work happens in a real background tab.
  *
- * Both sources actively refuse a service-worker fetch:
+ * Sources that refuse a fetch, and why a tab is the answer:
  *   Liquipedia  403 + "Verify you are human" unless its clearance cookie rides
  *               along (same URL, same instant: with cookies 200/380KB, without
  *               403/2059 bytes)
+ *   HLTV        Cloudflare's "Just a moment..." on some paths - map stats is
+ *               the usual one. A same-origin fetch from the match page still
+ *               gets a 403; only a real navigation runs the interstitial.
  *   Search      a captcha a fetch can never solve - Brave answers 429 with
  *               "your browser does not seem to have JavaScript enabled", Google
  *               redirects to /sorry/
@@ -20,15 +23,18 @@
  * dying tab still matches `liquipedia.net/*`, the next read inherits its id,
  * and twenty seconds later extractHtml dies with "No tab with id".
  *
- * The only fetch still attempted directly is a Liquipedia page - it is much
- * faster when the cookie happens to travel, and it falls back to the tab the
- * moment anything at all comes back that is not the article. A Liquipedia read
- * therefore escalates through three rungs, stopping at the first that returns
- * a real page:
+ * Liquipedia is still fetched first from the worker - it is much faster when
+ * the cookie happens to travel - and drops to the tab the moment anything at
+ * all comes back that is not the article. HLTV is fetched first from the match
+ * page (same origin, already in the tab the user is looking at) and takes the
+ * same drop when that comes back challenged. A read therefore escalates through
+ * three rungs, stopping at the first that returns a real page:
  *
- *   worker fetch    fastest, works only when the clearance cookie travels
- *   tab fetch       same-origin, from inside the tab, with its cookies
- *   tab navigation  the tab simply goes to the page, exactly as the user would
+ *   worker / page fetch   fastest; HLTV from the match page, Liquipedia from
+ *                         the worker
+ *   tab fetch             same-origin, from inside the tab, with its cookies
+ *   tab navigation        the tab simply goes to the page, exactly as the user
+ *                         would
  *
  * The escalation is deliberately blind to *why* the previous rung failed,
  * because the failure modes do not look alike: a Cloudflare challenge is a 403
@@ -41,31 +47,47 @@
 var DIAGNOSTIC_HEADERS = ['server', 'retry-after', 'cf-ray', 'cf-mitigated', 'x-cache', 'content-type'];
 var SEARCH_SPACING_MS = 1200;    // don't machine-gun the search engine
 
+function looksLikeChallenge(text) {
+  return /just a moment|verify you are human|are you a robot|captcha|checking your browser|javascript enabled/i.test(text || '');
+}
+
 function isChallenge(status, text) {
   if (status !== 403 && status !== 429 && status !== 503) return false;
-  return /verify you are human|are you a robot|captcha|checking your browser|javascript enabled/i.test(text || '');
+  return looksLikeChallenge(text);
 }
 
 function isLiquipediaUrl(url) {
   return /^https:\/\/liquipedia\.net\//.test(url || '');
 }
 
+function isHltvUrl(url) {
+  return /^https:\/\/www\.hltv\.org\//.test(url || '');
+}
+
+function pageOrigin(url) {
+  try { return new URL(url).origin; } catch (e) { return ''; }
+}
+
 /*
- * Did that response actually contain the article?
+ * Did that response actually contain the page that was asked for?
  *
  * A blocked page does not have to arrive with an error status: web filters,
  * captive portals and transparent proxies all answer 200 with their own HTML,
  * and that HTML parses perfectly well - into a thread with an empty roster in
- * it. So the body is checked rather than the status, and checked for what a
- * Liquipedia page *has* rather than for what a block page says: every article
- * is MediaWiki output, while a blocklist of filter vendors' wording would both
+ * it. So the body is checked rather than the status, and checked for what the
+ * real page *has* rather than for what a block page says. Liquipedia articles
+ * are MediaWiki output; HLTV pages carry the site chrome (navbar, #parent,
+ * stats/event sections). A blocklist of filter vendors' wording would both
  * miss the next filter and fire on an article that merely quotes one.
  */
 var MEDIAWIKI_MARKERS = /mw-parser-output|firstHeading|mw-body-content|wgPageName/;
+var HLTV_MARKERS = /\bnavbar\b|\bstats-section\b|\bround-history\b|\bevent-hub\b|id=["']parent["']/;
 
 function isRealPage(url, text) {
   if (!text) return false;
-  return isLiquipediaUrl(url) ? MEDIAWIKI_MARKERS.test(text) : true;
+  if (isLiquipediaUrl(url)) return MEDIAWIKI_MARKERS.test(text);
+  if (isHltvUrl(url)) return HLTV_MARKERS.test(text);
+  return true;
 }
 
 function excerptOf(text) {
@@ -495,9 +517,10 @@ function searchInTab(kind, name) {
   });
 }
 
-// Read a Liquipedia page. Tries a plain credentialed fetch first because it is
-// far quicker, and drops to the tab whenever that does not come back with the
-// article - a challenge, a filter's block page, or no response at all.
+// Read a Liquipedia (or HLTV) page. Tries a plain credentialed fetch first
+// because it is far quicker, and drops to the tab whenever that does not come
+// back with the article - a challenge, a filter's block page, or no response
+// at all.
 function fetchPage(url) {
   var t0 = Date.now();
   return fetch(url, { credentials: 'include' })
@@ -534,10 +557,8 @@ function fetchPage(url) {
     });
 }
 
-// The tab is only worth waking for a Liquipedia page; anything else is reported
-// as it failed.
 function retryInTab(url, failed) {
-  if (!isLiquipediaUrl(url)) return Promise.resolve(failed);
+  if (!isLiquipediaUrl(url) && !isHltvUrl(url)) return Promise.resolve(failed);
   return fetchPageInTab(url).then(function (viaTab) {
     viaTab.retriedAfter = {
       status: failed.status, bytes: failed.bytes, challenge: failed.challenge,
@@ -563,9 +584,10 @@ function fetchInTab(tabId, url, t0) {
 
 function readViaTab(t, url, t0) {
   return tabOrigin(t.id).then(function (origin) {
-    // already somewhere on liquipedia.net: try the cheap same-origin fetch
-    // first, and navigate only if it comes back with something else
-    var quick = origin === 'https://liquipedia.net'
+    // already on this origin: try the cheap same-origin fetch first, and
+    // navigate only if it comes back with something else
+    var want = pageOrigin(url);
+    var quick = origin && origin === want
       ? fetchInTab(t.id, url, t0).catch(function (e) {
           if (isMissingTabError(e)) throw e;
           return null;
@@ -591,21 +613,47 @@ function tabFetchFailed(url, t0, e) {
            error: String((e && e.message) || e) };
 }
 
+function wait(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+function navigatedResult(r, url, t0, ok) {
+  return { ok: ok, status: ok ? 200 : 0, url: r.url, text: r.html,
+           bytes: r.html.length, ms: Date.now() - t0, via: 'tab-navigate',
+           // whatever loaded was not the article: say so rather than hand
+           // back a block page that parses into an empty roster
+           excerpt: ok ? undefined : excerptOf(r.html),
+           intercepted: ok ? undefined : true };
+}
+
 // The last rung: the tab goes to the page itself. Nothing here is a fetch, an
 // XHR or an extension - it is a browser loading a URL, which is the request
 // every one of these defences is built to let through.
+//
+// Cloudflare's managed challenge paints "Just a moment..." and then reloads
+// into the real page. The first `complete` is that interstitial, so if the
+// body still looks like a challenge we wait and read again rather than
+// handing the interstitial back as the article.
 function navigateInTab(tabId, url, t0) {
   return navigate(tabId, url)
-    .then(function () { return runInTab(tabId, extractHtml); })
-    .then(function (r) {
-      var ok = isRealPage(url, r.html);
-      return { ok: ok, status: ok ? 200 : 0, url: r.url, text: r.html,
-               bytes: r.html.length, ms: Date.now() - t0, via: 'tab-navigate',
-               // whatever loaded was not the article: say so rather than hand
-               // back a block page that parses into an empty roster
-               excerpt: ok ? undefined : excerptOf(r.html),
-               intercepted: ok ? undefined : true };
-    });
+    .then(function () { return readNavigatedPage(tabId, url, t0, 6); });
+}
+
+function readNavigatedPage(tabId, url, t0, left) {
+  return runInTab(tabId, extractHtml).then(function (r) {
+    var ok = isRealPage(url, r.html);
+    if (ok) return navigatedResult(r, url, t0, true);
+    if (left > 1 && looksLikeChallenge(r.html)) {
+      return wait(1000).then(function () { return readNavigatedPage(tabId, url, t0, left - 1); });
+    }
+    return navigatedResult(r, url, t0, false);
+  }, function (e) {
+    if (isMissingTabError(e)) throw e;
+    if (left > 1) {
+      return wait(1000).then(function () { return readNavigatedPage(tabId, url, t0, left - 1); });
+    }
+    throw e;
+  });
 }
 
 function fetchPageInTab(url) {
@@ -632,7 +680,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return false;
   }
   if (msg && msg.type === 'fetchText') {
-    fetchPage(msg.url).then(sendResponse);
+    // viaTab: the caller already tried a fetch (the match page, for HLTV)
+    // and it came back challenged. Skip the worker rung - it cannot do
+    // better than a same-origin fetch from hltv.org itself.
+    (msg.viaTab ? fetchPageInTab(msg.url) : fetchPage(msg.url)).then(sendResponse);
     return true;
   }
   if (msg && msg.type === 'search') {

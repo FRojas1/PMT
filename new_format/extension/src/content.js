@@ -6,7 +6,10 @@
  *                              directory used for the next opponent
  *   - a map stats page         only for maps that went to overtime; the match
  *                              page reports OT as a single aggregate, the
- *                              per-half split is in the round history
+ *                              per-half split is in the round history. Fetched
+ *                              same-origin from this page; a Cloudflare 403
+ *                              ("Just a moment...") drops to the background
+ *                              tab, the same fallback Liquipedia already uses.
  *   - the Liquipedia event and team pages
  *
  * Liquipedia has no lookup by HLTV name, so those three pages are located by
@@ -16,9 +19,10 @@
  * saved page and searches again. Page contents are always re-read, so a thread
  * can never be built from a stale roster or ranking.
  *
- * Whatever search returns is checked to be the *kind* of page that was asked
- * for before it is used: a tournament page parses cleanly into a team that
- * never existed, and prints as one.
+ * Two threads from the same page:
+ *   Post-Match Thread              finished match, VRS, highlights, "advances to"
+ *   Live Match Discussion Thread   upcoming or in progress: streams, veto if it
+ *                                  exists, completed maps only, no VRS
  */
 
 var DEFAULTS = {
@@ -38,8 +42,10 @@ function getSettings() {
 
 /* ------------------------------------------------------------------ fetch */
 
-// HLTV is same-origin from here; anything else has to go via the service worker.
-// Every fetch is logged with its status, size and duration.
+// HLTV is same-origin from here, so it is fetched directly. Anything else
+// has to go via the service worker. A challenged HLTV response (Cloudflare's
+// "Just a moment..." on /stats/ is the usual one) drops to the same tab
+// Liquipedia already uses - a fetch cannot run that interstitial.
 function fetchDoc(url, label) {
   var t0 = Date.now();
   var tag = label ? label + ' <- ' + url : url;
@@ -48,19 +54,33 @@ function fetchDoc(url, label) {
     return fetch(url, { credentials: 'include' }).then(function (r) {
       return r.text().then(function (t) {
         var info = { via: 'page', status: r.status, bytes: t.length, ms: Date.now() - t0 };
-        if (r.ok) { PMTLog.info('fetch ' + tag, info); return { doc: parseHtml(t), url: r.url }; }
+        if (r.ok && !hltvLooksChallenged(t)) {
+          PMTLog.info('fetch ' + tag, info);
+          return { doc: parseHtml(t), url: r.url };
+        }
         info.excerpt = t.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400);
-        PMTLog.fail('fetch ' + tag + ' rejected', info);
-        throw new Error('HTTP ' + r.status);
+        info.challenge = hltvLooksChallenged(t) || undefined;
+        info.intercepted = r.ok || undefined;
+        return fetchViaWorker(url, tag, true, info);
       });
     }, function (e) {
-      PMTLog.error('fetch ' + tag, e);
-      throw e;
+      return fetchViaWorker(url, tag, true, {
+        via: 'page', status: 0, ms: Date.now() - t0,
+        networkError: true, error: String((e && e.message) || e)
+      });
     });
   }
 
+  return fetchViaWorker(url, tag, false, null);
+}
+
+function hltvLooksChallenged(text) {
+  return /just a moment|verify you are human|checking your browser/i.test(text || '');
+}
+
+function fetchViaWorker(url, tag, viaTab, pageFailed) {
   return new Promise(function (resolve, reject) {
-    chrome.runtime.sendMessage({ type: 'fetchText', url: url }, function (res) {
+    chrome.runtime.sendMessage({ type: 'fetchText', url: url, viaTab: viaTab }, function (res) {
       if (chrome.runtime.lastError) {
         PMTLog.error('fetch ' + tag, chrome.runtime.lastError);
         return reject(new Error(chrome.runtime.lastError.message));
@@ -77,6 +97,14 @@ function fetchDoc(url, label) {
         challenge: res.challenge, intercepted: res.intercepted,
         retriedAfter: res.retriedAfter, afterTabFetch: res.afterTabFetch
       };
+      if (pageFailed && !info.retriedAfter) {
+        info.retriedAfter = {
+          status: pageFailed.status, bytes: pageFailed.bytes,
+          challenge: pageFailed.challenge, intercepted: pageFailed.intercepted,
+          networkError: pageFailed.networkError, error: pageFailed.error,
+          excerpt: pageFailed.excerpt
+        };
+      }
       if (res.ok) PMTLog.info('fetch ' + tag, info);
       else PMTLog.fail('fetch ' + tag + ' rejected', info);
       if (!res.ok) return reject(new Error(res.error || ('HTTP ' + res.status)));
@@ -422,16 +450,36 @@ function parseHighlights(raw) {
   }).filter(Boolean);
 }
 
+// Liquipedia's event streams are preferred (same as the post-match thread).
+// When that table is empty - typical of a small online qualifier - fall back
+// to the match page, WORLD feeds first, capped so a 70-caster BLAST list does
+// not become the body of the thread.
+function pickHltvStreams(list) {
+  var src = list || [];
+  var world = src.filter(function (s) { return s.flag === 'WORLD'; });
+  var rest = src.filter(function (s) { return s.flag !== 'WORLD'; });
+  return world.concat(rest).slice(0, 4).map(function (s) {
+    return { label: s.label, url: s.url };
+  });
+}
+
 /* ---------------------------------------------------------------- generate */
 
 var busy = false;
+var lastKind = 'post';
 
 function generate(opts) {
   opts = opts || {};
+  var kind = opts.kind || lastKind;
+  lastKind = kind;
   if (busy) return;
   busy = true;
   if (!panel) buildPanel();
   panel.classList.add('pmt-open');
+  var titleLabel = panel.querySelector('.pmt-title-label');
+  if (titleLabel) {
+    titleLabel.textContent = kind === 'live' ? 'Live Match Discussion Thread' : 'Post-Match Thread';
+  }
   PMTLog.start(location.href);
   status('Reading match page…');
 
@@ -445,27 +493,38 @@ function generate(opts) {
     return status('Could not read the match page: ' + e.message, true);
   }
   PMTLog.info('match page parsed', {
+    kind: kind,
+    live: d.live,
     teams: d.teams.map(function (t) { return t.name + ' (' + t.flag + ') ' + t.score; }),
     event: d.event.name, eventUrl: d.event.url, prize: d.prize, venue: d.format.venue,
     stage: d.format.stage, veto: d.veto.length,
-    maps: d.maps.map(function (m) { return m.name + (m.played ? ' ' + m.score.join('-') + (m.hasOt ? ' OT' : '') : ' (unplayed)'); }),
-    statsAll: !!d.statsAll, vrs: !!d.vrs,
-    roles: d.roles, highlights: d.highlights.length
+    maps: d.maps.map(function (m) {
+      return m.name + ' [' + m.status + ']' +
+        (m.status === 'finished' ? ' ' + m.score.join('-') + (m.hasOt ? ' OT' : '') : '');
+    }),
+    statsAll: !!d.statsAll, vrs: !!d.vrs, hltvStreams: (d.hltvStreams || []).length,
+    roles: d.roles, highlights: d.highlights.length,
+    lineups: (d.lineups || []).map(function (g) {
+      return (g || []).map(function (p) { return p.nick + (p.rating ? ' ' + p.rating : ''); });
+    })
   });
   if (!d.teams[0] || !d.teams[0].name) {
     busy = false;
     PMTLog.save();
-    return status('This does not look like a finished match page.', true);
+    return status('This does not look like a match page.', true);
   }
 
   var hlBox = document.getElementById('pmt-hl');
-  if (!hlBox.value && d.highlights.length) {
-    hlBox.value = d.highlights.map(function (h) { return h.title + ' | ' + h.url; }).join('\n');
-    hlBox.dataset.pristine = hlBox.value;
+  var highlights = null;
+  if (kind !== 'live') {
+    if (!hlBox.value && d.highlights.length) {
+      hlBox.value = d.highlights.map(function (h) { return h.title + ' | ' + h.url; }).join('\n');
+      hlBox.dataset.pristine = hlBox.value;
+    }
+    // While the box is untouched HLTV's own text is used verbatim; a round-trip
+    // through the textarea would normalise away its double and trailing spaces.
+    highlights = hlBox.value === hlBox.dataset.pristine ? null : parseHighlights(hlBox.value);
   }
-  // While the box is untouched HLTV's own text is used verbatim; a round-trip
-  // through the textarea would normalise away its double and trailing spaces.
-  var highlights = hlBox.value === hlBox.dataset.pristine ? null : parseHighlights(hlBox.value);
 
   var overrides = {
     event: document.getElementById('pmt-lp-event').value.trim(),
@@ -585,8 +644,11 @@ function generate(opts) {
       }).catch(soft('Liquipedia ' + name));
   });
 
-  // Only overtime maps need their stats page read.
-  var otMaps = d.maps.filter(function (m) { return m.played && m.hasOt && m.statsUrl; });
+  // Only overtime maps need their stats page read. On a live page, only maps
+  // that have actually finished can have overtime.
+  var otMaps = d.maps.filter(function (m) {
+    return m.hasOt && m.statsUrl && (kind === 'live' ? m.status === 'finished' : m.played);
+  });
   PMTLog.info('overtime maps to fetch', otMaps.map(function (m) { return m.name; }));
   var overtimePages = Promise.all(otMaps.map(function (m) {
     return fetchDoc(m.statsUrl, 'mapstats ' + m.name)
@@ -622,7 +684,7 @@ function generate(opts) {
       });
 
       var next = null;
-      if (lpe) {
+      if (kind !== 'live' && lpe) {
         var names = [[d.teams[0].name, lp1 && lp1.name], [d.teams[1].name, lp2 && lp2.name]];
         var scores = [String(d.teams[0].score), String(d.teams[1].score)];
         next = nextRound(lpe.doc, names, scores);
@@ -659,9 +721,19 @@ function generate(opts) {
       if (next && next.advance) next.advance.opponents = tagOpponents(next.advance.opponents);
       if (next && next.drop) next.drop.opponents = tagOpponents(next.drop.opponents);
 
+      var streams = lpe ? parseStreams(lpe.doc) : [];
+      if (kind === 'live' && !streams.length) {
+        streams = pickHltvStreams(d.hltvStreams);
+        if (streams.length) {
+          PMTLog.info('using HLTV match streams - Liquipedia had none', {
+            n: streams.length, labels: streams.map(function (s) { return s.label; })
+          });
+        }
+      }
+
       PMTLog.info('liquipedia summary', {
         event: lpe && lpe.url,
-        streams: lpe ? parseStreams(lpe.doc).length : 0,
+        streams: streams.length,
         team1: teamSummary(lp1), team2: teamSummary(lp2)
       });
       if (!lp1 || !lp2) {
@@ -673,9 +745,10 @@ function generate(opts) {
       document.getElementById('pmt-lp-t2').value = (lp2 && lp2.url) || '';
 
       var out = buildThread(d, {
+        kind: kind,
         lp: [lp1, lp2],
         lpEventUrl: lpe && lpe.url,
-        streams: lpe ? parseStreams(lpe.doc) : [],
+        streams: streams,
         next: next,
         setting: ev && ev.setting,
         overtimes: overtimes,
@@ -685,7 +758,7 @@ function generate(opts) {
 
       document.getElementById('pmt-title').value = out.title;
       document.getElementById('pmt-body').value = out.body;
-      if (!next) notes.push('no bracket entry - "advances to" line omitted');
+      if (kind !== 'live' && !next) notes.push('no bracket entry - "advances to" line omitted');
       PMTLog.info('rendered', { titleLength: out.title.length, bodyLength: out.body.length, notes: notes });
 
       return copyText(out.body)
@@ -716,11 +789,17 @@ function generate(opts) {
 
 /* -------------------------------------------------------------- entrypoint */
 
-if (document.querySelector('.teamsBox') && !document.querySelector('.pmt-launch')) {
+if (document.querySelector('.teamsBox') && !document.querySelector('.pmt-launch-stack')) {
+  var stack = el('div', 'pmt-launch-stack');
+  var liveBtn = el('button', 'pmt-launch pmt-launch-live', 'Live Match Discussion Thread');
+  liveBtn.title = 'Generate the r/GlobalOffensive live match discussion thread';
+  liveBtn.addEventListener('click', function () { generate({ kind: 'live' }); });
   var btn = el('button', 'pmt-launch', 'Post-Match Thread');
   btn.title = 'Generate the r/GlobalOffensive post-match thread';
-  btn.addEventListener('click', function () { generate(); });
-  document.body.appendChild(btn);
+  btn.addEventListener('click', function () { generate({ kind: 'post' }); });
+  stack.appendChild(liveBtn);
+  stack.appendChild(btn);
+  document.body.appendChild(stack);
 }
 
 chrome.runtime.onMessage.addListener(function (msg) {

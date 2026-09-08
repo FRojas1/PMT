@@ -1,9 +1,12 @@
 /*
  * render.js - the new post-match thread format.
  *
- * Built against new_format/SampleBody.md. Whitespace is deliberate: reddit needs
- * a trailing double space for a hard line break, so the "  \n" literals and the
- * bare "&nbsp;" spacer lines are reproduced exactly as the sample has them.
+ * Built against new_format/SampleBody.md for post-match threads. Live match
+ * discussion reuses the same blocks (event, teams, veto, finished-map stats)
+ * and drops the finished-match-only sections: VRS, "advances to", highlights.
+ * Whitespace is deliberate: reddit needs a trailing double space for a hard
+ * line break, so the "  \n" literals and the bare "&nbsp;" spacer lines are
+ * reproduced exactly as the sample has them.
  *
  * Three defects in that sample are deliberately NOT reproduced:
  *   - a stray "NaN" after Spirit's last infobox link
@@ -35,6 +38,37 @@ function mean2(values) {
 }
 
 /* ------------------------------------------------------------------ pieces */
+
+function makeCtx(d, extra) {
+  extra = extra || {};
+  var ctx = {
+    lp: extra.lp || [null, null],
+    lpEventUrl: extra.lpEventUrl || '',
+    streams: extra.streams || [],
+    next: extra.next || null,
+    setting: extra.setting || null,
+    overtimes: extra.overtimes || {},
+    highlights: extra.highlights || null,
+    flagLink: function (code) { return flagLink(code); },
+    anchor: function (i) { return teamAnchor(d.teams[i].name, d.teams[i].flag, extra.logoOverrides); },
+    teamTag: function (i) {
+      return '[' + flagEmoji(d.teams[i].flag) + '](' +
+        teamAnchor(d.teams[i].name, d.teams[i].flag, extra.logoOverrides) + ')';
+    },
+    // the header and team blocks use Liquipedia's full name; the tables use HLTV's short one
+    lpName: function (i) { return (ctx.lp[i] && ctx.lp[i].name) || d.teams[i].name; }
+  };
+  return ctx;
+}
+
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+function formatUtc(ms) {
+  if (!ms) return '';
+  var t = new Date(ms);
+  if (isNaN(t.getTime())) return '';
+  return pad2(t.getUTCHours()) + ':' + pad2(t.getUTCMinutes()) + ' UTC';
+}
 
 function headerBlock(d, ctx) {
   var t1 = d.teams[0], t2 = d.teams[1];
@@ -132,7 +166,7 @@ function teamBlock(d, ctx, i) {
   var lines = [bits.join(' | ') + '  '];
   var people = function (list) {
     return list.map(function (p) {
-      return ctx.flagLink(p.flag) + ' ' + p.nick + roleMark(p.nick, d.roles);
+      return ctx.flagLink(p.flag) + ' ' + p.nick + roleMark(p.nick, d.roles, p.id);
     }).join(' | ');
   };
   if (lp && lp.roster.length) lines.push('**Roster**: ' + people(lp.roster) + '  ');
@@ -181,6 +215,44 @@ function statsTable(groups, d, ctx) {
     });
   });
   return lines.join('\n');
+}
+
+// Same shape as the match-stats table, but the numbers are HLTV's last-3-months
+// highlighted stats (Rating / KPR / DPR / KAST / ADR / Round Swing) for the
+// five actually playing, stand-ins included.
+function lineupTable(d, ctx) {
+  var groups = d.lineups || [];
+  if (!groups.some(function (g) { return g && g.length; })) return '';
+  var lines = [
+    '|**Team**|**KPR**|**DPR**|**KAST**|**ADR**|**Swing**|**Rating**|',
+    '|:--|--:|--:|--:|--:|--:|--:|--:|'
+  ];
+  groups.forEach(function (g, i) {
+    if (!g || !g.length || !d.teams[i]) return;
+    var rated = g.map(function (p) { return parseFloat(p.rating); }).filter(function (n) {
+      return !isNaN(n);
+    });
+    var avg = mean2(rated);
+    lines.push('|&nbsp;&nbsp;' + ctx.teamTag(i) + ' **' + d.teams[i].name + '**||||||' + avg + '|');
+    g.forEach(function (p) {
+      lines.push('|' + ctx.flagLink(p.flag) + ' ' + p.nick + roleMark(p.nick, d.roles, p.id) +
+        '|' + (p.kpr || '') + '|' + (p.dpr || '') + '|' + (p.kast || '') +
+        '|' + (p.adr || '') + '|' + (p.swing || '') + '|' + (p.rating || '') + '|');
+    });
+  });
+  return lines.join('\n');
+}
+
+function lineupBlock(d, ctx) {
+  var table = lineupTable(d, ctx);
+  if (!table) return '';
+  return [
+    '### Lineups',
+    '',
+    table,
+    '',
+    '^Last ^3 ^months ^on ^HLTV. ^This ^is ^who ^is ^playing ^this ^match, ^including ^stand-ins.'
+  ].join('\n');
 }
 
 // |Team|T|CT|OT1^CT:T|Total|  - one OT column per overtime played, its header
@@ -243,25 +315,65 @@ function buildTitle(d) {
     (stage ? ' - ' + stage : '') + ' / Post-Match Discussion';
 }
 
+function buildLiveTitle(d) {
+  var stage = d.format.stage;
+  return d.teams[0].name + ' vs ' + d.teams[1].name + ' / ' + d.event.name +
+    (stage ? ' - ' + stage : '') + ' / Live Match Discussion';
+}
+
+function liveHeaderBlock(d, ctx) {
+  var series = seriesFromMaps(d.maps);
+  var scoreBit = (series[0] + series[1] > 0)
+    ? series[0] + '-' + series[1]
+    : 'vs';
+  var lines = [
+    '#' + ctx.lpName(0) + ' ' + ctx.teamTag(0) + ' ' +
+    '[' + scoreBit + '](' + d.matchUrl + ') ' +
+    ctx.teamTag(1) + ' ' + ctx.lpName(1) + '  ',
+    ''
+  ];
+  var allTba = d.maps.length && d.maps.every(function (m) {
+    return m.status === 'tba' || /^tba$/i.test(m.name);
+  });
+  if (allTba) {
+    lines.push('**Maps:** TBA  ');
+  } else {
+    d.maps.forEach(function (m) {
+      if (m.status === 'tba' || /^tba$/i.test(m.name)) lines.push('**TBA**  ');
+      else if (m.status === 'finished') {
+        lines.push('**' + m.name + ':** ' + m.score[0] + '-' + m.score[1] + '  ');
+      } else if (m.status === 'live') {
+        lines.push('**' + m.name + ':** LIVE  ');
+      } else {
+        lines.push('**' + m.name + '**  ');
+      }
+    });
+  }
+  return lines.join('\n');
+}
+
+function liveStatusBlock(d) {
+  var lines = [];
+  if (d.format && d.format.bestOf) lines.push('**' + d.format.bestOf + '**  ');
+  if (d.live && d.live.isLive) lines.push('**LIVE**  ');
+  else if (d.live && d.live.unix) {
+    var when = formatUtc(d.live.unix);
+    if (when) lines.push('**Starts:** ' + when + '  ');
+  }
+  var stakes = ((d.format && d.format.outcomeSentences) || []).filter(Boolean).join(' ');
+  if (stakes) lines.push('**' + stakes + '**  ');
+  return lines.join('\n');
+}
+
+function liveVetoBlock(d, ctx) {
+  var veto = vetoBlock(d, ctx);
+  if (veto) return veto;
+  return '###Map Vetoes\n\nThe vetoes for this match are not yet available.';
+}
+
 function buildBody(d, extra) {
   extra = extra || {};
-  var ctx = {
-    lp: extra.lp || [null, null],
-    lpEventUrl: extra.lpEventUrl || '',
-    streams: extra.streams || [],
-    next: extra.next || null,
-    setting: extra.setting || null,
-    overtimes: extra.overtimes || {},
-    highlights: extra.highlights || null,
-    flagLink: function (code) { return flagLink(code); },
-    anchor: function (i) { return teamAnchor(d.teams[i].name, d.teams[i].flag, extra.logoOverrides); },
-    teamTag: function (i) {
-      return '[' + flagEmoji(d.teams[i].flag) + '](' +
-        teamAnchor(d.teams[i].name, d.teams[i].flag, extra.logoOverrides) + ')';
-    },
-    // the header and team blocks use Liquipedia's full name; the tables use HLTV's short one
-    lpName: function (i) { return (ctx.lp[i] && ctx.lp[i].name) || d.teams[i].name; }
-  };
+  var ctx = makeCtx(d, extra);
 
   var parts = [];
   parts.push(headerBlock(d, ctx) + '\n&nbsp;\n');
@@ -275,6 +387,9 @@ function buildBody(d, extra) {
 
   parts.push(eventBlock(d, ctx) + '\n\n&nbsp;\n\n---  \n');
   parts.push(teamInfoBlock(d, ctx) + '\n\n&nbsp;\n\n-----\n');
+
+  var lineup = lineupBlock(d, ctx);
+  if (lineup) parts.push(lineup + '\n\n&nbsp;\n\n-----\n');
 
   var veto = vetoBlock(d, ctx);
   if (veto) parts.push(veto + '\n\n&nbsp;\n\n\n---\n');
@@ -297,10 +412,52 @@ function buildBody(d, extra) {
   return parts.join('\n') + '\n';
 }
 
+function buildLiveBody(d, extra) {
+  extra = extra || {};
+  var ctx = makeCtx(d, extra);
+
+  var parts = [];
+  parts.push(liveHeaderBlock(d, ctx) + '\n&nbsp;\n');
+
+  var status = liveStatusBlock(d);
+  if (status) parts.push(status + '\n\n&nbsp;\n');
+  parts.push('-----');
+
+  parts.push(eventBlock(d, ctx) + '\n\n&nbsp;\n\n---  \n');
+  parts.push(teamInfoBlock(d, ctx) + '\n\n&nbsp;\n\n-----\n');
+
+  var lineup = lineupBlock(d, ctx);
+  if (lineup) parts.push(lineup + '\n\n&nbsp;\n\n-----\n');
+
+  parts.push(liveVetoBlock(d, ctx) + '\n\n&nbsp;\n\n\n---\n');
+
+  if (d.statsAll) {
+    parts.push('###Match Stats So Far\n\n' + statsTable(d.statsAll, d, ctx) +
+      '\n\n###[HLTV Match Page](' + d.matchUrl + ')\n\n\n&nbsp;\n\n---\n\n&nbsp;\n');
+  }
+
+  var finished = d.maps.filter(function (m) { return m.status === 'finished'; });
+  finished.forEach(function (m, n) {
+    var i = d.maps.indexOf(m);
+    parts.push(mapBlock(m, i < 0 ? n : i, d, ctx) + '\n\n\n&nbsp;\n\n---\n' +
+      (n < finished.length - 1 ? '\n&nbsp;\n' : ''));
+  });
+
+  parts.push(FOOTER);
+  return parts.join('\n') + '\n';
+}
+
 function buildThread(d, extra) {
+  extra = extra || {};
+  if (extra.kind === 'live') {
+    return { title: buildLiveTitle(d), body: buildLiveBody(d, extra) };
+  }
   return { title: buildTitle(d), body: buildBody(d, extra) };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { buildTitle: buildTitle, buildBody: buildBody, buildThread: buildThread, mean2: mean2 };
+  module.exports = {
+    buildTitle: buildTitle, buildBody: buildBody, buildThread: buildThread,
+    buildLiveTitle: buildLiveTitle, buildLiveBody: buildLiveBody, mean2: mean2
+  };
 }

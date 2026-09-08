@@ -268,9 +268,22 @@ function scrapeMaps(doc) {
       ot[0] += g[0] ? g[0].rounds : 0;
       ot[1] += g[1] ? g[1].rounds : 0;
     });
+    // HLTV puts `.results.played` on a revealed map even before it starts
+    // (scores are "-"); won/lost is what means the map is actually over.
+    // `.results.optional` is a leftover that has not been reached yet.
+    var decided = !!(holder.querySelector(
+      '.results-left.won, .results-left.lost, .results-right.won, .results-right.lost'
+    ));
+    var status = 'tba';
+    if (!/^tba$/i.test(name) && holder.querySelector('.results')) {
+      status = decided ? 'finished' : 'upcoming';
+    }
+
     maps.push({
       name: name,
       played: played,
+      status: status,
+      optional: !!(holder.querySelector('.results.optional')),
       statsUrl: statsUrl,
       mapstatsId: mapstatsId,
       score: [parseInt(txt(left), 10) || 0, parseInt(txt(right), 10) || 0],
@@ -280,6 +293,44 @@ function scrapeMaps(doc) {
     });
   });
   return maps;
+}
+
+// Whether the match is on now, and when it was due to start. The countdown
+// node sits in `.timeAndEvent`: class `countdown-live` (or the text LIVE)
+// once it is underway, otherwise a remaining "10m : 46s". `data-unix` is the
+// scheduled start in milliseconds.
+function scrapeLive(doc) {
+  var el = doc.querySelector('.timeAndEvent .countdown');
+  var text = txt(el);
+  var unix = parseInt((el && el.getAttribute('data-unix')) || '0', 10) || 0;
+  var isLive = !!(el && (el.classList.contains('countdown-live') || /^LIVE$/i.test(text)));
+  return { isLive: isLive, countdown: text, unix: unix };
+}
+
+// Mark the current map LIVE. HLTV does not label it: the first revealed map
+// that is not finished (and not the optional leftover) is the one being
+// played, but only while the countdown says the match is on.
+function markLiveMap(maps, live) {
+  if (!live || !live.isLive) return maps;
+  for (var i = 0; i < maps.length; i++) {
+    if (maps[i].status === 'upcoming' && !maps[i].optional) {
+      maps[i].status = 'live';
+      break;
+    }
+  }
+  return maps;
+}
+
+// Series score from finished maps. The teamsBox won/lost figure is missing
+// (or still 0-0) on a live page, even after map 1 has been decided.
+function seriesFromMaps(maps) {
+  var a = 0, b = 0;
+  (maps || []).forEach(function (m) {
+    if (m.status !== 'finished') return;
+    if (m.score[0] > m.score[1]) a++;
+    else if (m.score[1] > m.score[0]) b++;
+  });
+  return [a, b];
 }
 
 // 0-based map index -> VOD url, taken from the "Rewatch" stream list labels.
@@ -292,6 +343,32 @@ function scrapeVods(doc) {
     if (out[idx]) return; // the page lists every VOD twice (spoiler / no-spoiler)
     out[idx] = normalizeVod(box.getAttribute('data-stream-embed'));
   });
+  return out;
+}
+
+// Live streams listed on the match page, in viewer order. The HLTV Live box
+// is the site's own player and is skipped; the rest already carry a watch
+// URL on `.external-stream a`. Used when Liquipedia has no stream table.
+function scrapeHltvStreams(doc) {
+  var out = [];
+  var seen = {};
+  Array.prototype.forEach.call(
+    doc.querySelectorAll('.streams .stream-box[data-stream-provider]'),
+    function (box) {
+      var a = box.querySelector('.external-stream a[href], a[href]');
+      var href = a ? a.getAttribute('href') : '';
+      if (!href || seen[href]) return;
+      var label = txt(box.querySelector('.stream-box-embed'));
+      if (!label) return;
+      seen[href] = true;
+      out.push({
+        label: label,
+        url: href,
+        flag: flagCodeFromImg(box.querySelector('.stream-flag')),
+        provider: box.getAttribute('data-stream-provider') || ''
+      });
+    }
+  );
   return out;
 }
 
@@ -347,9 +424,38 @@ function nickKey(nick) {
 // and Liquipedia's roster - which has no HLTV ids - falls back to the nick.
 // A player can hold more than one role (cadiaN captains and AWPs), so every
 // pill is collected rather than the first.
+//
+// Current pages put the pills on `.player-compare` (the photo cell), not on a
+// `/player/` link. Older markup still has the link; both are read.
 function scrapeRoles(doc) {
   var byId = {};
   var byNick = {};
+  var remember = function (id, nick, found) {
+    if (!found.length) return;
+    if (id) byId[String(id)] = found;
+    if (nick) byNick[nickKey(nick)] = found;
+  };
+  Array.prototype.forEach.call(doc.querySelectorAll('#lineups .player-compare[data-player-id]'), function (el) {
+    var found = [];
+    if (el.querySelector('.role-pill--igl')) found.push('igl');
+    if (el.querySelector('.role-pill--awp')) found.push('awp');
+    if (!found.length) return;
+    var id = el.getAttribute('data-player-id');
+    var nick = txt(el.querySelector('.text-ellipsis'));
+    if (!nick) {
+      var named = doc.querySelector(
+        '#lineups .player-compare.flagAlign[data-player-id="' + id + '"] .text-ellipsis'
+      );
+      nick = txt(named);
+    }
+    if (!nick) {
+      var img = el.querySelector('img.player-photo');
+      var alt = (img && img.getAttribute('alt')) || '';
+      var quoted = alt.match(/'([^']+)'/);
+      nick = quoted ? quoted[1] : '';
+    }
+    remember(id, nick, found);
+  });
   Array.prototype.forEach.call(doc.querySelectorAll('#lineups a[href*="/player/"]'), function (a) {
     var href = a.getAttribute('href') || '';
     var found = [];
@@ -358,10 +464,63 @@ function scrapeRoles(doc) {
     if (!found.length) return;
     var m = href.match(/\/player\/(\d+)\/([^/?#]+)/);
     if (!m) return;
-    byId[m[1]] = found;
-    byNick[nickKey(m[2])] = found;
+    remember(m[1], m[2], found);
   });
   return { byId: byId, byNick: byNick };
+}
+
+function parseLineupStatsAttr(el, attr) {
+  if (!el) return {};
+  try {
+    return JSON.parse(el.getAttribute(attr) || '{}') || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function attachLineupStats(player, data) {
+  var row = data && data[String(player.id)];
+  if (!row) return player;
+  player.rating = row.rating || '';
+  player.kpr = row.kpr || '';
+  player.dpr = row.dpr || '';
+  player.kast = row.kast || '';
+  player.adr = row.adr || '';
+  player.swing = row.roundSwing || '';
+  return player;
+}
+
+// Who is actually playing this match, from `#lineups`. The Liquipedia roster
+// is the org's current squad and misses a stand-in; this is the five HLTV
+// lists under each team. Stats are the last-3-months highlighted numbers
+// HLTV already computed for the compare widget (`data-teamN-players-data`).
+// Absent on some pages (lineups not yet posted).
+function scrapeLineups(doc) {
+  var out = [[], []];
+  var compare = doc.querySelector('#lineups .lineups-compare-container');
+  var stats = [
+    parseLineupStatsAttr(compare, 'data-team1-players-data'),
+    parseLineupStatsAttr(compare, 'data-team2-players-data')
+  ];
+  Array.prototype.forEach.call(doc.querySelectorAll('#lineups .lineup'), function (box, i) {
+    if (i > 1) return;
+    var players = [];
+    Array.prototype.forEach.call(
+      box.querySelectorAll('td.player:not(.player-image) .player-compare'),
+      function (el) {
+        var nick = txt(el.querySelector('.text-ellipsis'));
+        if (!nick) return;
+        players.push(attachLineupStats({
+          nick: nick,
+          id: parseInt(el.getAttribute('data-player-id') || '0', 10),
+          flag: flagCodeFromImg(el.querySelector('img.flag'))
+        }, stats[i]));
+      }
+    );
+    players.sort(function (a, b) { return (parseFloat(b.rating) || 0) - (parseFloat(a.rating) || 0); });
+    out[i] = players;
+  });
+  return out;
 }
 
 // The roles a player holds, given whatever identifier is to hand.
@@ -539,7 +698,8 @@ function scrapeVrs(doc, teams) {
 
 function scrapeMatch(doc, url) {
   var teams = scrapeTeams(doc);
-  var maps = scrapeMaps(doc);
+  var live = scrapeLive(doc);
+  var maps = markLiveMap(scrapeMaps(doc), live);
   var eventA = doc.querySelector('.timeAndEvent .event a');
   var matchUrl = String(url || '').split('#')[0].split('?')[0];
   var statsByMap = {};
@@ -554,14 +714,17 @@ function scrapeMatch(doc, url) {
       url: eventA ? new URL(eventA.getAttribute('href'), 'https://www.hltv.org').toString() : ''
     },
     teams: teams,
+    live: live,
     format: scrapeFormatBox(doc),
     veto: scrapeVeto(doc, teams),
     maps: maps,
     vods: scrapeVods(doc),
     roles: scrapeRoles(doc),
+    lineups: scrapeLineups(doc),
     highlights: scrapeHighlights(doc),
     prize: shortPrize(scrapePrize(doc)),
     vrs: scrapeVrs(doc, teams),
+    hltvStreams: scrapeHltvStreams(doc),
     statsAll: scrapeStatsTab(doc, 'all-content'),
     statsByMap: statsByMap
   };
@@ -570,6 +733,7 @@ function scrapeMatch(doc, url) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     scrapeMatch: scrapeMatch, scrapeOvertimes: scrapeOvertimes, scrapeRoles: scrapeRoles,
+    scrapeLineups: scrapeLineups, scrapeLive: scrapeLive, scrapeHltvStreams: scrapeHltvStreams, seriesFromMaps: seriesFromMaps,
     rolesFor: rolesFor, nickKey: nickKey,
     shortPrize: shortPrize, flagEmoji: flagEmoji, langAnchor: langAnchor,
     teamAnchor: teamAnchor, teamTag: teamTag, flagLink: flagLink, titleCase: titleCase,

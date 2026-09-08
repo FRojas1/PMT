@@ -12,7 +12,9 @@ want, or both, though they inject the same button so run one at a time.
 
 1. `chrome://extensions` → enable **Developer mode**.
 2. **Load unpacked** → pick this `extension/` folder.
-3. Open any HLTV match page and click the button bottom-right.
+3. Open any HLTV match page. Two buttons sit bottom-right:
+   **Live Match Discussion Thread** for a match that has not finished, and
+   **Post-Match Thread** for one that has.
 
 ## What it fetches
 
@@ -227,6 +229,13 @@ HLTV's stats tables keep it (`huNter-`), and Liquipedia has its own. Roles are
 therefore indexed by HLTV player id *and* by a nick folded to letters and digits;
 the id wins wherever there is one, and Liquipedia's roster — which carries no
 HLTV ids — falls back to the folded nick.
+
+**Lineup.** A separate **Lineups** table, same shape as Full Match Stats, for
+who HLTV lists as playing this match — so a stand-in who is not on the
+Liquipedia roster still appears. The numbers are HLTV's last-3-months
+highlighted stats (KPR, DPR, KAST, ADR, Round Swing, Rating), already on the
+match page as `data-teamN-players-data`. Omitted when lineups have not been
+posted yet.
 
 **Team names across sources.** Liquipedia's bracket says "FUT Esports" where
 HLTV says "FUT". Looking a team up in the HLTV event directory ignores the org
