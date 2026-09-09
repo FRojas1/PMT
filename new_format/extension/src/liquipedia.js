@@ -467,12 +467,36 @@ function nameMatches(entryNames, candidates) {
   return false;
 }
 
+// HLTV is the source of truth for who won: Liquipedia's cell often lags a map
+// behind (this page still said 1-1 after HLTV had 2-1). The win marker and the
+// cell scores are only a fallback when HLTV did not supply a decisive score.
 function winningEntry(entries, wantScores) {
+  var a = Number(wantScores[0]), b = Number(wantScores[1]);
+  if (isFinite(a) && isFinite(b) && a !== b) return a > b ? entries[0] : entries[1];
   var marked = entries.filter(function (e) { return e.won; })[0];
   if (marked) return marked;
-  var hi = Math.max(Number(wantScores[0]), Number(wantScores[1]));
+  var hi = Math.max(a, b);
   if (!isFinite(hi) || hi <= 0) return null;
   return entries.filter(function (e) { return Number(e.score) === hi; })[0] || null;
+}
+
+function scoresEqual(entries, want) {
+  return String(entries[0].score) === String(want[0]) &&
+    String(entries[1].score) === String(want[1]);
+}
+
+// Prefer the cell whose scores match HLTV (so a rematch in a later round is
+// not confused with the series just played). If Liquipedia has not caught up,
+// the unique pairing of these two teams is enough; if they appear twice, the
+// slot that still has no winner is the live one.
+function pickNamedMatch(found) {
+  var exact = found.filter(function (x) { return x.exact; });
+  if (exact.length) return exact[0];
+  if (found.length === 1) return found[0];
+  var open = found.filter(function (x) {
+    return !x.entries.some(function (e) { return e.won; });
+  });
+  return open.length === 1 ? open[0] : null;
 }
 
 function opponentNames(entries) {
@@ -530,6 +554,7 @@ function upcomingFor(bracket, teamNames, except) {
  * used to be treated as "not decided" and the whole line was dropped.
  */
 function nextRound(doc, teamNames, scores) {
+  var found = [];
   var brackets = doc.querySelectorAll('.brkts-bracket');
   for (var b = 0; b < brackets.length; b++) {
     var bracket = brackets[b];
@@ -541,46 +566,55 @@ function nextRound(doc, teamNames, scores) {
       var flipped = nameMatches(entries[0].names, teamNames[1]) && nameMatches(entries[1].names, teamNames[0]);
       if (!a && !flipped) continue;
       var want = flipped ? [scores[1], scores[0]] : scores;
-      var scored = entries[0].score !== '' || entries[1].score !== '';
-      if (scored &&
-          (String(entries[0].score) !== String(want[0]) ||
-           String(entries[1].score) !== String(want[1]))) {
-        continue;
-      }
-
-      var winner = winningEntry(entries, want);
-      var loser = winner
-        ? entries.filter(function (e) { return e !== winner; })[0]
-        : null;
-      var result = {};
-
-      var parent = parentMatch(matches[m]);
-      if (parent && winner) {
-        var round = prettyRound(roundNameFor(parent, bracket));
-        if (round && !/^qualif/i.test(round)) {
-          result.advance = {
-            round: round,
-            opponents: opponentNames(facingTeams(parent, winner.names, matches[m]))
-          };
-        }
-      }
-
-      if (loser && sectionKind(matches[m], bracket) === 'upper') {
-        var dropMatch = upcomingFor(bracket, loser.names.concat(flipped ? teamNames[0] : teamNames[1]),
-                                    matches[m]);
-        if (dropMatch && sectionKind(dropMatch, bracket) === 'lower') {
-          result.drop = {
-            dest: 'the Lower bracket',
-            opponents: opponentNames(facingTeams(dropMatch, loser.names, matches[m]))
-          };
-        }
-      }
-
-      if (result.advance || result.drop) return result;
-      return null;
+      found.push({
+        match: matches[m],
+        bracket: bracket,
+        entries: entries,
+        flipped: flipped,
+        want: want,
+        exact: scoresEqual(entries, want)
+      });
     }
   }
-  return null;
+
+  var pick = pickNamedMatch(found);
+  if (!pick) return null;
+
+  var entries = pick.entries;
+  var want = pick.want;
+  var flipped = pick.flipped;
+  var winner = winningEntry(entries, want);
+  var loser = winner
+    ? entries.filter(function (e) { return e !== winner; })[0]
+    : null;
+  var result = {};
+
+  var parent = parentMatch(pick.match);
+  if (parent && winner) {
+    var round = prettyRound(roundNameFor(parent, pick.bracket));
+    if (round && !/^qualif/i.test(round)) {
+      result.advance = {
+        round: round,
+        opponents: opponentNames(facingTeams(parent, winner.names, pick.match))
+      };
+    }
+  }
+
+  if (loser && sectionKind(pick.match, pick.bracket) === 'upper') {
+    var dropMatch = upcomingFor(pick.bracket, loser.names.concat(flipped ? teamNames[0] : teamNames[1]),
+                                pick.match);
+    if (dropMatch && sectionKind(dropMatch, pick.bracket) === 'lower') {
+      result.drop = {
+        dest: 'the Lower bracket',
+        opponents: opponentNames(facingTeams(dropMatch, loser.names, pick.match))
+      };
+    }
+  }
+
+  if (!(result.advance || result.drop)) return null;
+  result.lpScores = [entries[0].score, entries[1].score];
+  result.scoreMatched = pick.exact;
+  return result;
 }
 
 if (typeof module !== 'undefined' && module.exports) {

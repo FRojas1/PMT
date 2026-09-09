@@ -10,6 +10,8 @@
  *                              same-origin from this page; a Cloudflare 403
  *                              ("Just a moment...") drops to the background
  *                              tab, the same fallback Liquipedia already uses.
+ *   - HLTV team pages          only when the match page has no role pills;
+ *                              HLTV hides `#lineups` the moment a series ends
  *   - the Liquipedia event and team pages
  *
  * Liquipedia has no lookup by HLTV name, so those three pages are located by
@@ -644,6 +646,25 @@ function generate(opts) {
       }).catch(soft('Liquipedia ' + name));
   });
 
+  var hltvTeamRoles = Promise.resolve(null);
+  if (rolesMissing(d.roles)) {
+    PMTLog.info('match page has no role pills - fetching HLTV team pages');
+    hltvTeamRoles = Promise.all([0, 1].map(function (i) {
+      var url = d.teams[i] && d.teams[i].urlPlain;
+      if (!url) return Promise.resolve(null);
+      return fetchDoc(url, 'hltv team ' + d.teams[i].name).then(function (r) {
+        var roles = scrapeRoles(r.doc);
+        PMTLog.info('hltv team roles ' + d.teams[i].name, {
+          byId: roles.byId, byNick: roles.byNick,
+          bodyshots: r.doc.querySelectorAll('.bodyshot-team a[href*="/player/"]').length
+        });
+        return roles;
+      }).catch(soft('HLTV team page ' + d.teams[i].name));
+    })).then(function (pair) {
+      return mergeRoles(pair[0], pair[1]);
+    });
+  }
+
   // Only overtime maps need their stats page read. On a live page, only maps
   // that have actually finished can have overtime.
   var otMaps = d.maps.filter(function (m) {
@@ -669,9 +690,14 @@ function generate(opts) {
       .catch(soft('overtime for ' + m.name));
   }));
 
-  Promise.all([getSettings(), eventPage, lpEvent, lpTeams[0], lpTeams[1], overtimePages])
+  Promise.all([getSettings(), eventPage, lpEvent, lpTeams[0], lpTeams[1], overtimePages, hltvTeamRoles])
     .then(function (r) {
       var settings = r[0], ev = r[1], lpe = r[2], lp1 = r[3], lp2 = r[4], ots = r[5];
+      if (r[6]) {
+        d.roles = mergeRoles(d.roles, r[6]);
+        PMTLog.info('roles after HLTV team pages', d.roles);
+        if (rolesMissing(d.roles)) notes.push('no IGL/AWP pills on HLTV team pages');
+      }
 
       var overtimes = {};
       (ots || []).forEach(function (o) {

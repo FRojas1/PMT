@@ -419,14 +419,16 @@ function nickKey(nick) {
   return String(nick || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-// Player roles, from the lineups section, where HLTV pills each player's role.
-// Indexed by player id as well as nick: the id is exact wherever we have one,
-// and Liquipedia's roster - which has no HLTV ids - falls back to the nick.
-// A player can hold more than one role (cadiaN captains and AWPs), so every
-// pill is collected rather than the first.
+// Player roles, from HLTV's IGL/AWP pills. Indexed by player id as well as
+// nick: the id is exact wherever we have one, and Liquipedia's roster - which
+// has no HLTV ids - falls back to the nick. A player can hold more than one
+// role (cadiaN captains and AWPs), so every pill is collected rather than
+// the first.
 //
-// Current pages put the pills on `.player-compare` (the photo cell), not on a
-// `/player/` link. Older markup still has the link; both are read.
+// Match pages put the pills on `#lineups .player-compare` (or, on older
+// markup, on a `/player/` link). HLTV strips that whole block the moment a
+// series ends, so the same pills are also read from `.bodyshot-team` on a
+// team profile.
 function scrapeRoles(doc) {
   var byId = {};
   var byNick = {};
@@ -466,7 +468,40 @@ function scrapeRoles(doc) {
     if (!m) return;
     remember(m[1], m[2], found);
   });
+  // Team profile: current roster photos. HLTV strips `#lineups` from a match
+  // page the moment the series ends, so the IGL/AWP pills have to come from
+  // here instead. The same function is used on both documents.
+  Array.prototype.forEach.call(doc.querySelectorAll('.bodyshot-team a[href*="/player/"]'), function (a) {
+    var found = [];
+    if (a.querySelector('.role-pill--igl')) found.push('igl');
+    if (a.querySelector('.role-pill--awp')) found.push('awp');
+    if (!found.length) return;
+    var href = a.getAttribute('href') || '';
+    var m = href.match(/\/player\/(\d+)\/([^/?#]+)/);
+    if (!m) return;
+    var nick = a.getAttribute('title') ||
+      txt(a.querySelector('.nickname-container .text-ellipsis')) || m[2];
+    remember(m[1], nick, found);
+  });
   return { byId: byId, byNick: byNick };
+}
+
+function rolesMissing(roles) {
+  if (!roles) return true;
+  return !Object.keys(roles.byId || {}).length && !Object.keys(roles.byNick || {}).length;
+}
+
+// Match-page pills win when both sources have an entry for the same player.
+function mergeRoles(base, extra) {
+  var out = { byId: {}, byNick: {} };
+  var copy = function (src) {
+    if (!src) return;
+    Object.keys(src.byId || {}).forEach(function (k) { out.byId[k] = src.byId[k]; });
+    Object.keys(src.byNick || {}).forEach(function (k) { out.byNick[k] = src.byNick[k]; });
+  };
+  copy(extra);
+  copy(base);
+  return out;
 }
 
 function parseLineupStatsAttr(el, attr) {
@@ -734,7 +769,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     scrapeMatch: scrapeMatch, scrapeOvertimes: scrapeOvertimes, scrapeRoles: scrapeRoles,
     scrapeLineups: scrapeLineups, scrapeLive: scrapeLive, scrapeHltvStreams: scrapeHltvStreams, seriesFromMaps: seriesFromMaps,
-    rolesFor: rolesFor, nickKey: nickKey,
+    rolesFor: rolesFor, rolesMissing: rolesMissing, mergeRoles: mergeRoles, nickKey: nickKey,
     shortPrize: shortPrize, flagEmoji: flagEmoji, langAnchor: langAnchor,
     teamAnchor: teamAnchor, teamTag: teamTag, flagLink: flagLink, titleCase: titleCase,
     highlightTitle: highlightTitle, txt: txt, flagCodeFromImg: flagCodeFromImg

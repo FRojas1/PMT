@@ -23,6 +23,7 @@ Everything comes off the match page unless listed here.
 | Fetch | Why |
 |---|---|
 | HLTV event page | the venue for the Setting line, and a name → flag directory used to give the next bracket opponent a flag |
+| HLTV team pages ×2 | **only when the match page has no role pills** — HLTV hides `#lineups` the moment a series ends, and the IGL/AWP markers live on the team profiles instead |
 | HLTV map stats page | **only for maps that went to overtime** — the match page reports OT as a single aggregate (`(4:2)`), and the per-half split the format needs is in the round history |
 | Search ×3 | locating the Liquipedia event and team pages — Google, falling back to Brave |
 | Liquipedia event page | stream links, and the bracket for "advances to … and will face …" |
@@ -219,9 +220,12 @@ cannot be read directly. It is still knowable: the opponent held the opposite
 side that half, and the same team held the opposite side in the other half. Both
 inferences are applied, which is what turns OG's `^:T` into `^CT:T`.
 
-**Roles.** `♛` in-game leader, `⊕` main AWPer, from HLTV's `#lineups` role pills.
-A player can hold both — cadiaN captains OG *and* AWPs for them — so every pill
-is rendered, in the order HLTV lists them: `cadiaN ♛ ⊕`.
+**Roles.** `♛` in-game leader, `⊕` main AWPer, from HLTV's role pills. They
+usually sit in `#lineups` on the match page. Right after a series HLTV hides
+that block, so the same pills are read from each team's profile
+(`.bodyshot-team`) instead. A player can hold both — cadiaN captains OG *and*
+AWPs for them — so every pill is rendered, in the order HLTV lists them:
+`cadiaN ♛ ⊕`.
 
 Matching a pill to a player is fiddlier than it looks, because the same person
 arrives under three spellings: HLTV's URL slug drops punctuation (`hunter`),
@@ -265,11 +269,13 @@ a team's own subdomain. It is also dropped on its host: any `.ru` domain, or
 rule covers vk.ru, vkvideo.ru, ok.ru and rutube.ru without naming them, so only
 the networks sitting on other TLDs are listed.
 
-**Bracket.** The match is found by team names plus score. The winner's parent
-match is the next round; the loser's next unplayed slot in the other section is
-the drop. Either slot may still be TBA — the two teams playing for it are read
-from the feeder matches under that slot, and printed as `A or B` rather than
-dropping the line.
+**Bracket.** The match is found by the two team names. The score is used only
+when they have already met in another round of the same event; if Liquipedia's
+cell is still on an earlier map (1-1 on a finished 2-1), HLTV's score decides
+who won. The winner's parent match is the next round; the loser's next unplayed
+slot in the other section is the drop. Either slot may still be TBA — the two
+teams playing for it are read from the feeder matches under that slot, and
+printed as `A or B` rather than dropping the line.
 
 Round names lose the word "Bracket" (`Upper Bracket Final` → `Upper Final`). A
 loss in the upper bracket is `drop to the Lower bracket`, not the specific
