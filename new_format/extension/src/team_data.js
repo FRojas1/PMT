@@ -35,14 +35,11 @@ function getJsonFromId(id) {
         ? '[' + flag + '](#lang-' + flagCode + ')'
         : '';
 
-    // Flag updates to use Reddit css flag formatting
-    data['Flag'] = langFlag;
-
-    // Flag Name updates to use the Reddit css logo formatting
+    // Flag updates to use the Reddit css logo formatting
     if (logoCode) {
-        data['Flag Name'] = '[' + flag + '](#' + logoCode + '-logo) ' + data['Name'];
+        data['Flag'] = '[' + flag + '](#' + logoCode + '-logo)';
     } else {
-        data['Flag Name'] = langFlag + ' ' + data['Name'];
+        data['Flag'] = langFlag;
     }
 
     // player/coaches fields
