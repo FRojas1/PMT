@@ -16,10 +16,13 @@
 
 var ROLE_IGL = '♛';   // ♛
 var ROLE_AWP = '⊕';   // ⊕
-var FOOTER =
-  '[**This thread was created by the Post-Match Team.**]' +
-  '(https://docs.google.com/spreadsheets/d/1k5TiV7VuDKLa41MfcDgP1XiBkPvAo_HInRmNlKKEIBM/edit?usp=sharing)  \n' +
-  'Want to help post these threads? Message /u/Undercover-Cactus to join the Post-Match Team.   ';
+var FOOTER =           // Footer for the Post-Match Thread - Provides PMT links and encourages new members to join
+  '**This thread was created by the Post-Match Team.**  \n' +
+  '[**PMT Discord**](https://discord.gg/X6Pn2jbmJc) | ' + // PMT Discord invite link
+  '[**PMT Creator**](https://postmatchteam.uk) | ' + // Should eventually be replaced by link to download extension once that is publicly and easily available
+  '[**PMT Archive**](https://docs.google.com/spreadsheets/d/1k5TiV7VuDKLa41MfcDgP1XiBkPvAo_HInRmNlKKEIBM/edit?usp=sharing)  \n' + // Arcive of previous match threads. Once password protection is added to main schedule, that should also be linked
+  'The PMT is always looking for help! If you\'d want to help contribute, message u/Undercover-Cactus on Reddit, or join the Discord (encouraged but not required). ' +
+  'Match threads do not take that long to create once you know what you\'re doing, and you would not be required to contribute any specific amount - even one match a year would be helpful. Thanks!  ';
 
 var ROLE_SYMBOL = { igl: ROLE_IGL, awp: ROLE_AWP };
 
