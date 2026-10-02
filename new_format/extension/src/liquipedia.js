@@ -51,6 +51,10 @@ var LINK_ORDER = [
  * icon cannot: a blocked link is as often the Official Site as it is the VK
  * one. `.ru` as a rule already covers vk.ru, vkvideo.ru, ok.ru and rutube.ru
  * without naming them, so only the networks sitting on other TLDs are listed.
+ *
+ * The same filters remove a post that names a gambling brand, so a link that
+ * carries one in its host or handle goes too (censor.js) - twitter.com/
+ * BCGameEsports, betclicapogee.gg - while the team's unbranded links stay.
  */
 var BLOCKED_LINK_KIND = { vk: 1, telegram: 1, discord: 1 };
 
@@ -59,6 +63,7 @@ var BLOCKED_LINK_HOST =
 
 function isBlockedLink(kind, url) {
   if (BLOCKED_LINK_KIND[kind]) return true;
+  if (typeof isGamblingLink === 'function' && isGamblingLink(url)) return true;
   try {
     return BLOCKED_LINK_HOST.test(new URL(url, 'https://liquipedia.net').hostname);
   } catch (e) {
@@ -255,6 +260,8 @@ function parseTeamPage(doc, url) {
 
   return {
     url: url,
+    // the page's id, for a link that cannot carry the page's name (censor.js)
+    articleId: typeof liquipediaArticleId === 'function' ? liquipediaArticleId(doc) : '',
     name: lpText(doc.querySelector('.fo-nttax-infobox .infobox-header'))
             .replace(/^\[e\]\[h\]/, '').trim() || lpText(doc.querySelector('#firstHeading')),
     links: infoboxLinks(doc),
@@ -283,6 +290,8 @@ function parseStreams(doc) {
     var gotTwitch = false;
     Array.prototype.forEach.call(cell.querySelectorAll('a'), function (a) {
       var href = a.getAttribute('href') || '';
+      // a channel named after a betting sponsor is a link the filters remove
+      if (typeof isGamblingLink === 'function' && isGamblingLink(href)) return;
       if (!gotTwitch && /twitch\.tv\//.test(href)) { twitch.push(href); gotTwitch = true; }
       if (!youtube && /youtube\.com\//.test(href)) youtube = href;
     });
@@ -338,30 +347,53 @@ function matchEntries(match) {
  *     .brkts-round-body        (lower bracket trees)
  *     ...
  *
+ * Sections are not always side by side at the top, though. A bracket that
+ * runs both halves into one grand final nests the lower half - header row and
+ * all - inside the grand final's tree:
+ *
+ *   .brkts-bracket
+ *     .brkts-round-header      Upper Bracket QF | Upper SF | Upper Final | Grand Final
+ *     .brkts-round-body        (the grand final)
+ *       .brkts-round-lower
+ *         .brkts-round-body    (the upper final, and the upper half under it)
+ *         .brkts-round-header  Lower Bracket Round 1 | Lower QF | Lower SF | Lower Final
+ *         .brkts-round-body    (the lower final, and the lower half under it)
+ *
+ * Reading only the top-level header put every lower-bracket match under the
+ * upper one: Fnatic, winning Lower Bracket Round 1 at Stake Ranked Episode 4,
+ * "advanced to Upper Quarter Finals". So the header that governs a match is
+ * the nearest one before any of its ancestors, and the tree that header heads
+ * is what its column is counted within.
+ *
  * Within a section the trees nest, so a match's column is found by counting
  * back from the section's last *playable* column - trailing "Qualified" columns
  * are qualification slots, not rounds, and counting them is what made an upper
  * bracket quarter-final report that its winner advanced to "Qualified".
  */
 
-function matchDepth(match, bracket) {
-  var n = match.parentElement, d = 0;
-  while (n && n !== bracket) {
+// { header, root }: the header row governing this match, and the subtree
+// (the ancestor right after that header) whose columns it names.
+function sectionOf(match, bracket) {
+  for (var n = match; n && n !== bracket; n = n.parentElement) {
+    var p = n.previousElementSibling;
+    while (p && !p.classList.contains('brkts-round-header')) p = p.previousElementSibling;
+    if (p) return { header: p, root: n };
+  }
+  return { header: null, root: bracket };
+}
+
+// How many round-bodies deep the match sits inside its section's tree.
+function matchDepth(match, root) {
+  var d = 0;
+  for (var n = match.parentElement; n; n = n.parentElement) {
     if (n.classList && n.classList.contains('brkts-round-body')) d++;
-    n = n.parentElement;
+    if (n === root) break;
   }
   return d;
 }
 
-// The header row governing this match: the nearest one before the top-level
-// round-body the match sits in.
 function sectionHeader(match, bracket) {
-  var top = match;
-  while (top && top.parentElement !== bracket) top = top.parentElement;
-  if (!top) return null;
-  var n = top.previousElementSibling;
-  while (n && !n.classList.contains('brkts-round-header')) n = n.previousElementSibling;
-  return n;
+  return sectionOf(match, bracket).header;
 }
 
 // Each header cell repeats itself at several lengths; the first option is the
@@ -375,11 +407,12 @@ function headerNames(header) {
 }
 
 function roundNameFor(match, bracket) {
-  var names = headerNames(sectionHeader(match, bracket));
+  var section = sectionOf(match, bracket);
+  var names = headerNames(section.header);
   if (!names.length) return '';
   var last = names.length - 1;
   while (last > 0 && /^qualif/i.test(names[last])) last--;   // drop the qualification slots
-  var col = last - (matchDepth(match, bracket) - 1);
+  var col = last - (matchDepth(match, section.root) - 1);
   return names[col] || '';
 }
 

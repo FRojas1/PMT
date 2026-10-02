@@ -2,19 +2,23 @@
   "manifest_version": 3,
   "name": "HLTV Post-Match Thread (new format)",
   "description": "Turns an HLTV match page into a r/GlobalOffensive post-match thread in the new format, with Liquipedia event, team and bracket details.",
-  "version": "2.2.0",
+  "version": "2.5.0",
   "permissions": [
     "storage",
     "clipboardWrite",
     "scripting",
-    "tabs"
+    "tabs",
+    "alarms",
+    "notifications",
+    "tabGroups"
   ],
   "host_permissions": [
     "https://www.hltv.org/*",
     "https://liquipedia.net/*",
     "https://www.google.com/*",
     "https://search.brave.com/*",
-    "https://old.reddit.com/*"
+    "https://old.reddit.com/*",
+    "https://www.reddit.com/*"
   ],
   "background": {
     "service_worker": "src/background.js"
@@ -27,6 +31,7 @@
       "js": [
         "src/log.js",
         "src/teams.js",
+        "src/censor.js",
         "src/hltv.js",
         "src/liquipedia.js",
         "src/render.js",
@@ -39,7 +44,10 @@
     },
     {
       "matches": [
-        "https://old.reddit.com/r/*/submit*"
+        "https://old.reddit.com/r/*/submit*",
+        "https://old.reddit.com/r/*/comments/*",
+        "https://www.reddit.com/r/*/submit*",
+        "https://www.reddit.com/r/*/comments/*"
       ],
       "js": [
         "src/reddit.js"

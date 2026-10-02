@@ -22,17 +22,31 @@
 .pmt-launch-live { background: #b4532a; }
 .pmt-launch-live:hover { background: #c46235; }
 
+/* Schedule button: follows its job's state */
+.pmt-launch-schedule { background: #3b7d4f; }
+.pmt-launch-schedule:hover { background: #458f5b; }
+.pmt-launch-schedule.pmt-sched-watching,
+.pmt-launch-schedule.pmt-sched-generating,
+.pmt-launch-schedule.pmt-sched-submitting { background: #5b4a9c; }
+.pmt-launch-schedule.pmt-sched-watching:hover,
+.pmt-launch-schedule.pmt-sched-generating:hover,
+.pmt-launch-schedule.pmt-sched-submitting:hover { background: #6a58ad; }
+.pmt-launch-schedule.pmt-sched-attention,
+.pmt-launch-schedule.pmt-sched-failed { background: #c0392b; }
+.pmt-launch-schedule.pmt-sched-attention:hover,
+.pmt-launch-schedule.pmt-sched-failed:hover { background: #d04434; }
+
 .pmt-lp { display: flex; flex-direction: column; gap: 4px; }
 
 .pmt-panel {
   position: fixed;
   right: 18px;
-  bottom: 118px;
+  bottom: 162px;   /* clear of the three launch buttons */
   z-index: 2147483000;
   display: none;
   width: 620px;
   max-width: calc(100vw - 36px);
-  max-height: calc(100vh - 100px);
+  max-height: calc(100vh - 180px);
   flex-direction: column;
   gap: 6px;
   padding: 12px;

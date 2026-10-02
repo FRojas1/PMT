@@ -12,9 +12,11 @@ want, or both, though they inject the same button so run one at a time.
 
 1. `chrome://extensions` → enable **Developer mode**.
 2. **Load unpacked** → pick this `extension/` folder.
-3. Open any HLTV match page. Two buttons sit bottom-right:
-   **Live Match Discussion Thread** for a match that has not finished, and
-   **Post-Match Thread** for one that has.
+3. Open any HLTV match page. Three buttons sit bottom-right:
+   **Live Match Discussion Thread** for a match that has not finished,
+   **Schedule Post-Match Thread** to have the post-match thread posted by
+   itself once the match ends (see [Scheduled posting](#scheduled-posting)), and
+   **Post-Match Thread** for a match that has already finished.
 
 ## What it fetches
 
@@ -269,6 +271,72 @@ a team's own subdomain. It is also dropped on its host: any `.ru` domain, or
 rule covers vk.ru, vkvideo.ru, ok.ru and rutube.ru without naming them, so only
 the networks sitting on other TLDs are listed.
 
+**Gambling brands.** The same filters remove a post that names a gambling
+brand, and several teams carry one. Some carry a sponsor's name; others are
+owned outright by a bookmaker. `src/censor.js` rewrites those names everywhere
+the thread prints a name: the title, headers, team information, tables,
+"advance to" lines, highlight titles and stream labels. The replacements are
+what these teams are already called where betting brands aren't allowed. The
+Esports World Cup uses PVISION and BB Team, Liquipedia itself lists 1win as
+"1w Team" and BET-M 33 as "33", and SportsBetExpert is SBE to everyone. Checked
+by hand against the Valve ranking's top 150 (25 August and 2 October 2026), these
+seven are the only gambling-branded teams in it:
+
+| Team (HLTV / Liquipedia) | Brand | Becomes |
+|---|---|---|
+| BETBOOM / BetBoom Team | BetBoom, a bookmaker (owner) | BB / BB Team |
+| PARIVISION | PARI, a bookmaker (owner) | PVISION |
+| 1win / 1w Team | 1win, a bookmaker (owner) | 1W / 1w Team |
+| BC.Game / BC.Game Esports | BC.Game, a crypto casino (owner) | BCG / BCG Esports |
+| Betclic / Betclic Apogee Esports | Betclic, a bookmaker (sponsor) | Apogee / Apogee Esports |
+| BET-M / BET-M 33 (now 33) | BET-M, a bookmaker (sponsor) | 33 |
+| SportsBetExpert | a betting tipster (owner) | SBE |
+
+Three sponsors also have event-name rules: *Stake Ranked* becomes *StarLadder
+Ranked* (StarLadder's own billing is "StarLadder Stake Ranked"), *Thunderpick*
+becomes *TP*, and *Parimatch* becomes *PM*. Academies and events named after a
+team brand come along for free ("BetBoom Dacha" → "BB Dacha", "1win Private
+Club" → "1W Private Club").
+
+Links carry names too, so:
+
+- **Socials:** a team's social link is dropped when its host or handle carries
+  the brand, through the same filter as VK/Telegram/Discord. Unbranded links
+  stay: a FACEIT team id, a YouTube channel id, `@BBTEAMCS2`, `team33_official`,
+  `SBETeam`. On the live pages, BC.Game loses its site, Instagram, Twitter, Twitch
+  and YouTube. BetBoom loses its site, Facebook, Instagram and Twitter. PARIVISION
+  loses Instagram, TikTok and Twitter. 1win loses Instagram and Twitter.
+  Betclic Apogee loses its site, Facebook, Instagram, Twitter and Twitch.
+- **Streams:** a stream channel named after a brand is dropped.
+- **HLTV links:** HLTV finds a page by its id and ignores the slug.
+  `/matches`, `/team`, `/events` and `/stats/matches/mapstatsid` all redirect
+  `<id>/<anything>` to the right page. So a branded slug is rewritten by the
+  same rules: `/matches/2398001/b8-vs-fnatic-stake-ranked-episode-4` becomes
+  `…/b8-vs-fnatic-starladder-ranked-episode-4`.
+- **Liquipedia links:** Liquipedia addresses a page by its name, so a branded
+  link becomes the page's id, `index.php?curid=<wgArticleId>`, which opens the
+  same article.
+- **Flairs:** a subreddit flair anchor carrying the brand (`#betboom-logo`) is
+  skipped, and the team gets its country flag.
+
+All of this happens on a copy, at the last moment before rendering. The bracket
+lookup, overtime rows and flag directory all match on the real names, and the
+panel's Liquipedia boxes and the link cache keep the real addresses.
+
+Anything the rules miss is still caught. The finished title and body are
+scanned for these brands and about twenty other betting and skin-gambling
+names that sponsor CS (Stake, GG.BET, 1xBet, Parimatch, Rainbet, CSGORoll and
+others). Anything found is named in the run log and in the panel's "Missing"
+note. A **scheduled** thread that still names one is filled in and flaired but
+*not* submitted: its submit page stops with the brand named, for you to edit
+out. Short or ordinary-looking words carry word boundaries, so "Paris",
+"mistakes" and "stakes" don't count. The bare word "stake" does, so a highlight
+titled "…at stake" would be flagged; that only adds a note, nothing is
+rewritten.
+
+To add a team, add a line to `GAMBLING_NAME_RULES` (and its brand to
+`GAMBLING_TERMS`) in `src/censor.js`.
+
 **Bracket.** The match is found by the two team names. The score is used only
 when they have already met in another round of the same event; if Liquipedia's
 cell is still on an earlier map (1-1 on a finished 2-1), HLTV's score decides
@@ -297,6 +365,31 @@ So a match's column is counted back from *its own section's* last playable
 column, and trailing "Qualified" columns are skipped — they are qualification
 slots, not rounds. Counting them was what made an upper bracket quarter-final
 report that its winner advanced to "Qualified".
+
+Sections aren't always side by side at the top, though. A bracket where both
+halves run into one grand final nests the lower half, header row and all,
+*inside* the grand final's tree:
+
+```
+.brkts-bracket
+  .brkts-round-header    Upper Bracket QF | Upper SF | Upper Final | Grand Final
+  .brkts-round-body      (the grand final)
+    .brkts-round-lower
+      .brkts-round-body    (the upper final, and the upper half under it)
+      .brkts-round-header  Lower Bracket Round 1 | Lower QF | Lower SF | Lower Final
+      .brkts-round-body    (the lower final, and the lower half under it)
+```
+
+Reading only the top-level header put every lower-bracket match under the upper
+header. At Stake Ranked Episode 4, Fnatic won Lower Bracket Round 1 and the
+thread said they "advance to Upper Quarter Finals". Losers of upper-bracket
+matches also got no drop line, because their lower-bracket match was read as an
+upper one. So the header that applies to a match is the nearest one before *any*
+of its ancestors, and columns are counted within the tree that header heads. On
+the five saved event pages (EWC 2026, IEM Beijing qualifier, BLAST Open Fall
+2026, FISSURE Playground #3, Stake Ranked Episode 4), that changes only the
+Stake Ranked results. The other 87 played matches give the same answers as
+before.
 
 Team names are compared both verbatim and with org words dropped, so the bracket
 still resolves when HLTV says "Falcons" and Liquipedia says "Team Falcons" —
@@ -365,6 +458,181 @@ The panel's status line already names what is missing in plain words, e.g.
 **Options page also has "Forget Liquipedia links"** — the link cache never
 expires, so this is how a wrong search result gets undone. It only removes the
 `lp:` keys, not your settings.
+
+## Scheduled posting
+
+**Schedule Post-Match Thread** keeps watching a match and posts the thread as
+soon as it is over. Nobody has to be at the keyboard. It can be clicked at any
+point: before the match starts, during it, or after it ends (in which case it
+posts straight away). The button then shows how far the job has got, and
+clicking it again cancels. The toolbar badge counts running jobs and turns into
+a red `!` when one needs you. A desktop notification says when a thread went up
+or when a job stopped.
+
+It works like every other lookup here, in a real tab rather than a fetch
+(`src/scheduler.js`):
+
+1. **Watch.** The job gets its own inactive tab on the match page. Every
+   *Check every* minutes (1 by default; set it in Options), that tab is sent to
+   the match again at a fresh address, `…?pmt-check=<token>`. A start time more
+   than 15 minutes away is slept towards, with a look every half hour in case
+   HLTV moves the match. If you close the tab, or navigate it somewhere else, a
+   new one opens at the next check and yours is left alone. Memory saver is told
+   not to discard the tab.
+
+   **It never reloads.** After Cloudflare's "Just a moment…" check has run in a
+   tab, the page shown is the reply to a form the check submitted. Reloading it
+   would re-send that form, so Chrome asks *"Confirm Form Resubmission"*. Nobody
+   answers, the reload never happens, and the old page stays where it is. Up to
+   2.4.2 the watch reloaded, so after a challenge it read the same stale `LIVE`
+   page every minute, long after the match had ended, while those dialogs
+   piled up. A plain visit never asks that. The token in the address also
+   proves the page being read is the one just asked for. A check that finds
+   anything else on screen logs `the watch tab did not load the match` and
+   decides nothing. On the second one in a row, the tab is closed and replaced
+   with a fresh one. Two check errors in a row (an error page, say) do the same.
+
+   The log only records changes, so a long quiet match also gets a
+   `still live` line every half hour. A quiet log then means the watch has
+   stopped, not just that nothing changed. **Copy log** opens with the check
+   count, the last check and what it saw, and the next check.
+2. **Wait for the stats.** A match counts as over when the countdown reads
+   `Match over` *or* the teams box shows a won/tie score, since a live page has
+   no score there at all. The thread is not built until the Full Match Stats
+   table and every finished map's stats tab are on the page. Those can trail
+   `Match over` by a minute, and they make up most of the body. After five
+   minutes the thread is built without them, because a forfeit never gets any.
+3. **Build.** The content script in that same tab runs the normal Post-Match
+   pipeline (the same fetches, cache and checks as clicking the button) and hands
+   the title and body to the worker. This is a separate tab from the shared
+   Google/Liquipedia tab on purpose: the shared tab gets navigated away during a
+   build. A build that fails is retried twice, a minute apart.
+4. **Submit.** The old.reddit submit page opens in a background tab. The title
+   goes in the query string, as in the manual flow. The body is fetched from the
+   worker rather than put in the URL. `reddit.js` applies the
+   `Discussion | Esports` flair first, then reads it back from the form's
+   preview, and only then fills in the body and clicks **submit**. Once reddit
+   lands on `/comments/…`, the job is marked posted and the watch tab closes.
+
+   Old reddit is also served from **www.reddit.com**, and a tab opened on
+   old.reddit.com can end up there, so `reddit.js` runs on both hosts. It decides
+   it is looking at old reddit from the markup (the `#newlink` form), not from
+   the hostname. It also doesn't rely on the `#pmt-job` hash surviving the move:
+   a submit page without one asks the worker whether its tab was opened for a
+   scheduled thread. The first 2.3.0 build matched only old.reddit.com, so on a
+   www page it never ran, and the job just sat in *posting*. Now, if the submit
+   page hasn't asked for its thread within 2 minutes, the job stops as
+   *needs you* and the message says where the tab actually ended up.
+
+**Idle tabs wait in one tab group.** While a match is being watched, its tab
+sits in a collapsed purple group titled `PMT scheduled`. A few matches being
+watched are then one small chip in the tab strip. The posted thread's tab goes
+back in there once it's posted.
+
+*Idle* is the important word. **Chrome freezes the tabs of a group that has been
+collapsed for a few minutes**, and a frozen tab runs nothing: no content script,
+no message replies. A reload wakes the watch tab for about a second, which is
+enough to read `Match over` and start the build, but not to finish it. In 2.4.0
+every tab lived in the group: a build stalled a second in, all three attempts
+timed out, and it finished 2½ hours later when someone opened the tab. So now a
+tab only stays in the group while it is idle, and it is taken out for as long as
+it has work to do:
+
+| Tab | In the group | Out of it |
+|---|---|---|
+| watch tab | between checks | while it builds the thread (seconds), then back in |
+| submit page | after the thread is posted | from opening until posted, and while it waits on you |
+| shared Google/Liquipedia tab | never | it only exists during a build |
+
+The group isn't the only reason Chrome freezes a tab. A later log showed the
+watch tab frozen while it was *out* of the group (`"inGroup": false`): Chrome
+freezes plain hidden tabs too. So the working pages also hold a **Web Lock**,
+because Chrome leaves a page that holds one alone. The build holds
+`pmt-build-<job>` and releases it when it finishes, so an idle watch tab can
+still be frozen as usual. The submit page holds `pmt-submit-<job>` for as long
+as it's open, and loses it when it navigates to the new thread. A manual run
+takes no lock.
+
+The worker also watches Chrome's `frozen` flag on its working tabs. A tab frozen
+mid-build is logged (`Chrome froze the watch tab`) and taken out of the group.
+A build that times out says whether Chrome had frozen the tab, and the retry's
+reload wakes it. A build that reports in after its timeout but before the retry
+is used. One that reports in after the job gave up is kept, not posted, so
+**Copy body** has it.
+
+**A busy tab strip is waited out.** Chrome refuses every tab edit (open, reload,
+close, group) while it considers the tab strip busy, with *"Tabs cannot be
+edited right now (user may be dragging a tab)"*. A drag is one cause. The moment
+after a tab is clicked is another, so it happens with nobody dragging: a submit
+page once failed to open that way while the user sat on an unrelated tab. Every
+tab edit the extension makes (`tabEdit` in `background.js`) now retries for up to
+30 s when it gets that error. If the submit page still won't open, the job tries
+again a minute later, up to three times, before it asks for you.
+
+**If the group is deleted or ungrouped, nothing breaks:**
+
+- **Ungroup:** the tabs stay open and the group disappears. At its next check,
+  an idle watch tab is put into a new collapsed group.
+- **Close group:** this closes its tabs. Each job opens a new watch tab at its
+  next check, in a new group, and carries on.
+- **A tab you move into a group of your own** is left there.
+- **Tabs that are working** aren't in the group anyway, so neither action
+  affects a build or a submit.
+
+New tabs open in the group's window. The group is only re-collapsed after a tab
+joins if it was collapsed already, and Chrome expands it on its own when a
+notification or **Go to the submit tab** brings one of its tabs forward. When
+the only tab in the group leaves, Chrome deletes the group and a new one is made
+the next time a tab joins. The group's id is kept in `chrome.storage.session`,
+because group ids only last one browser session: an id remembered across a
+restart could point at one of your own groups. A tab you put in a group of your
+own is never moved.
+
+**It cannot post twice.** Submit is clicked only after the worker gives a
+go-ahead, and it gives one per job. That go-ahead is recorded before the click,
+so a reloaded submit page, a duplicated tab or a worker restart all find it
+already used. Only **Retry** in Options clears it, and Retry asks first if
+submit had already been clicked.
+
+**It stops and leaves the tab to you** rather than guess:
+
+| Stop | What to do |
+|---|---|
+| reddit shows a captcha | solve it and press submit (it is never touched) |
+| the flair would not apply, or did not stick | set it by hand and press submit |
+| reddit answered with an error (e.g. *you are doing that too much*) | wait it out and press submit |
+| no answer 90 s after submit | check the subreddit before retrying |
+| **Submit scheduled threads automatically** is off | review the page and press submit |
+
+A thread you finish by hand from that tab still counts as posted. A job gives up
+(`failed`) if HLTV deletes the match, if the page will not load three times
+running, if the build fails three times, or if the match is still not over 12
+hours after its start time. If HLTV shows a challenge three checks running, a
+notification asks you to pass it in the watch tab.
+
+**Options → Scheduled threads** lists every job, newest first, with its state,
+last check, the thread link once posted, anything the thread was missing, and a
+per-job log. Cancel, Retry and Remove are there as well, plus **Copy title** /
+**Copy body** for finishing a stuck thread by hand. Finished jobs are dropped
+after a week.
+
+There are two logs, and a bug report wants both:
+
+- **The job log** (**Copy log** on the job): every check, the build, and each
+  step on the submit page. `reddit.js` reports `page loaded` (with the host,
+  whether the hash survived, and whether the old layout is there), `form found`,
+  `flair picked`, `flair is on the form`, `title and body filled in` and
+  `clicked submit` to the worker. A failed flair step also records what the
+  page looked like (picker button, dropdown, label count, selector hit, preview
+  text).
+- **The run log** (Diagnostics, labelled `scheduled run`): the thread build
+  itself, exactly as for a manual run. It ends at `run finished` and says
+  nothing about reddit.
+
+A scheduled thread gets whatever the pipeline could find, just like a manual run
+does. If Liquipedia or search fails, it is posted with HLTV's details, and the
+job lists what was missing. Turn auto-submit off if you would rather check each
+one before it goes up.
 
 ## Panel, options, reddit
 

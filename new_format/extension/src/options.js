@@ -4,7 +4,9 @@ var DEFAULTS = {
   flair: 'Discussion | Esports',
   flairSelector: '.linkflair.linkflair-discussion.linkflair-esports > .linkflairlabel',
   flairApplySelector: '#newlink-flair-dropdown > form > button',
-  logoOverrides: {}
+  logoOverrides: {},
+  checkMinutes: 1,
+  autoSubmit: true
 };
 
 function toText(map) {
@@ -30,16 +32,21 @@ chrome.storage.sync.get(DEFAULTS, function (v) {
   document.getElementById('flairSelector').value = v.flairSelector;
   document.getElementById('flairApplySelector').value = v.flairApplySelector;
   document.getElementById('logos').value = toText(v.logoOverrides);
+  document.getElementById('checkMinutes').value = v.checkMinutes;
+  document.getElementById('autoSubmit').checked = v.autoSubmit !== false;
 });
 
 document.getElementById('save').addEventListener('click', function () {
+  var minutes = parseFloat(document.getElementById('checkMinutes').value);
   chrome.storage.sync.set({
     subreddit: document.getElementById('subreddit').value.trim().replace(/^\/?r\//, '') || 'GlobalOffensive',
     autoOpen: document.getElementById('autoOpen').checked,
     flair: document.getElementById('flair').value.trim(),
     flairSelector: document.getElementById('flairSelector').value.trim(),
     flairApplySelector: document.getElementById('flairApplySelector').value.trim(),
-    logoOverrides: toMap(document.getElementById('logos').value)
+    logoOverrides: toMap(document.getElementById('logos').value),
+    checkMinutes: minutes > 0 ? Math.min(30, Math.max(0.5, minutes)) : DEFAULTS.checkMinutes,
+    autoSubmit: document.getElementById('autoSubmit').checked
   }, function () {
     var s = document.getElementById('status');
     s.textContent = 'Saved';
@@ -127,4 +134,169 @@ document.getElementById('clearCache').addEventListener('click', function () {
   });
 });
 
+/* --------------------------------------------------------- scheduled jobs */
+
+var openLogs = {};
+
+var JOB_STATES = {
+  watching: 'watching', generating: 'building', submitting: 'posting', posted: 'posted',
+  attention: 'needs you', failed: 'failed', cancelled: 'cancelled'
+};
+
+function when(ms) {
+  return ms ? new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+}
+
+function jobLogText(job) {
+  return (job.log || []).map(function (e) {
+    return when(e.at) + '  ' + e.msg + (e.data === undefined ? '' : '  ' + JSON.stringify(e.data));
+  }).join('\n');
+}
+
+// What gets pasted into a bug report: the job's log with enough of the job
+// around it to read it cold.
+function jobReport(job) {
+  var v = '?';
+  try { v = chrome.runtime.getManifest().version; } catch (e) { /* options page */ }
+  var seen = job.lastSeen || {};
+  return ['# HLTV post-match thread - scheduled job log',
+    '# ' + (job.label || job.matchUrl),
+    '# ' + job.matchUrl,
+    '# id ' + job.id + ', state ' + job.state + (job.error ? ' - ' + job.error : '') + ', version ' + v,
+    // the log only records changes; this is what the watch was doing when copied
+    '# checks ' + (job.checks || 0) + ', last ' + (when(job.lastCheckAt) || 'never') +
+      (seen.phase ? ' (' + seen.phase + (seen.countdown ? ', "' + seen.countdown + '"' : '') + ')' : '') +
+      (job.state === 'watching' ? ', next ' + when(job.nextCheckAt) : '') +
+      (job.staleChecks ? ', stale pages in a row ' + job.staleChecks : '') +
+      (job.errors ? ', errors in a row ' + job.errors : ''),
+    '# copied ' + when(Date.now()),
+    ''].concat(jobLogText(job)).join('\n');
+}
+
+function copyWithFeedback(button, text) {
+  var label = button.textContent;
+  navigator.clipboard.writeText(text).then(function () {
+    button.textContent = 'Copied';
+    setTimeout(function () { button.textContent = label; }, 1200);
+  });
+}
+
+function jobButton(label, onClick) {
+  var b = document.createElement('button');
+  b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function sendJob(type, id) {
+  chrome.runtime.sendMessage({ type: type, jobId: id }, function () { void chrome.runtime.lastError; });
+}
+
+function jobSummary(job) {
+  var seen = job.lastSeen || {};
+  if (job.state === 'watching') {
+    return 'last checked ' + (when(job.lastCheckAt) || 'not yet') +
+      (seen.phase ? ' (' + seen.phase + (seen.countdown ? ', "' + seen.countdown + '"' : '') + ')' : '') +
+      ', next ' + when(job.nextCheckAt);
+  }
+  if (job.state === 'posted') return 'posted ' + when(job.updatedAt);
+  return 'since ' + when(job.updatedAt);
+}
+
+function renderJobs() {
+  chrome.storage.local.get(['pmt:jobs'], function (v) {
+    var jobs = (v && v['pmt:jobs']) || {};
+    var list = Object.keys(jobs).map(function (k) { return jobs[k]; })
+      .sort(function (a, b) { return b.createdAt - a.createdAt; });
+    var host = document.getElementById('jobs');
+    host.textContent = '';
+    if (!list.length) {
+      host.appendChild(Object.assign(document.createElement('p'),
+        { className: 'hint', textContent: 'Nothing scheduled.' }));
+      return;
+    }
+    list.forEach(function (job) {
+      var box = document.createElement('div');
+      box.className = 'run job';
+
+      var h = document.createElement('h3');
+      var pill = document.createElement('span');
+      pill.className = 'state ' + job.state;
+      pill.textContent = JOB_STATES[job.state] || job.state;
+      h.appendChild(pill);
+      var match = document.createElement('a');
+      match.href = job.matchUrl;
+      match.target = '_blank';
+      match.textContent = job.label || job.matchUrl;
+      h.appendChild(match);
+      box.appendChild(h);
+
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = 'scheduled ' + when(job.createdAt) + ' - ' + jobSummary(job);
+      box.appendChild(meta);
+
+      if (job.threadUrl) {
+        var link = document.createElement('div');
+        link.className = 'meta';
+        var a = document.createElement('a');
+        a.href = job.threadUrl;
+        a.target = '_blank';
+        a.textContent = job.threadUrl;
+        link.appendChild(a);
+        box.appendChild(link);
+      }
+      if (job.error && job.state !== 'posted') {
+        box.appendChild(Object.assign(document.createElement('div'), { className: 'err', textContent: job.error }));
+      }
+      if (job.notes && job.notes.length) {
+        box.appendChild(Object.assign(document.createElement('div'),
+          { className: 'meta', textContent: 'Missing from the thread: ' + job.notes.join('; ') }));
+      }
+
+      var active = job.state === 'watching' || job.state === 'generating' || job.state === 'submitting';
+      if (active) box.appendChild(jobButton('Cancel', function () { sendJob('scheduleCancel', job.id); }));
+      if (job.state === 'attention' || job.state === 'submitting') {
+        box.appendChild(jobButton('Go to the submit tab', function () { sendJob('scheduleFocus', job.id); }));
+      }
+      if (job.state === 'attention' || job.state === 'failed' || job.state === 'cancelled') {
+        box.appendChild(jobButton('Retry', function () {
+          // clearing the spent go-ahead is what would let a second copy go up
+          if (job.submitClickedAt && !confirm(
+            'Submit was already clicked for this thread. Check r/' + (job.subreddit || 'GlobalOffensive') +
+            ' first - retrying may post it twice. Retry anyway?')) return;
+          sendJob('scheduleRetry', job.id);
+        }));
+      }
+      if (!active) box.appendChild(jobButton('Remove', function () { sendJob('scheduleRemove', job.id); }));
+      // for finishing a stuck one by hand
+      if (job.body && job.state !== 'posted') {
+        var copyTitle = jobButton('Copy title', function () { copyWithFeedback(copyTitle, job.title || ''); });
+        var copyBody = jobButton('Copy body', function () { copyWithFeedback(copyBody, job.body); });
+        box.appendChild(copyTitle);
+        box.appendChild(copyBody);
+      }
+      var copyLog = jobButton('Copy log', function () { copyWithFeedback(copyLog, jobReport(job)); });
+      box.appendChild(copyLog);
+
+      // the list redraws on every check, so remember which logs were open
+      var pre = document.createElement('pre');
+      pre.textContent = jobLogText(job);
+      if (openLogs[job.id]) pre.classList.add('open');
+      var show = jobButton(openLogs[job.id] ? 'Hide log' : 'Log', function () {
+        openLogs[job.id] = pre.classList.toggle('open');
+        show.textContent = openLogs[job.id] ? 'Hide log' : 'Log';
+      });
+      box.appendChild(show);
+      box.appendChild(pre);
+      host.appendChild(box);
+    });
+  });
+}
+
+chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area === 'local' && changes['pmt:jobs']) renderJobs();
+});
+
+renderJobs();
 renderRuns();
