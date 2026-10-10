@@ -62,10 +62,14 @@ function flairNameCandidates(name) {
   return out;
 }
 
+// A flair whose anchor names a gambling brand (#betboom-logo) would put the
+// brand into the body by the back door, so it is passed over and the team gets
+// its country flag instead (censor.js).
 function teamFlairSlugFor(name, overrides) {
   var cands = flairNameCandidates(name);
   for (var i = 0; i < cands.length; i++) {
     var slug = teamFlairSlug(cands[i], overrides);
+    if (slug && typeof hasGamblingTerm === 'function' && hasGamblingTerm(slug)) return null;
     if (slug) return slug;
   }
   return null;

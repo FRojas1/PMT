@@ -25,6 +25,11 @@
  *   Post-Match Thread              finished match, VRS, highlights, "advances to"
  *   Live Match Discussion Thread   upcoming or in progress: streams, veto if it
  *                                  exists, completed maps only, no VRS
+ *
+ * And a third button that schedules the first: the service worker
+ * (scheduler.js) keeps a tab on this match, reloads it until the match is over,
+ * then asks the content script in *that* tab to run the same Post-Match
+ * pipeline (`scheduledGenerate`) and posts what comes back.
  */
 
 var DEFAULTS = {
@@ -465,24 +470,95 @@ function pickHltvStreams(list) {
   });
 }
 
+/*
+ * The thread's copy of what it is built from, with gambling brands rewritten
+ * or dropped (censor.js): names through the replacement rules, HLTV slugs
+ * rewritten, branded Liquipedia links swapped for the page id, branded stream
+ * links dropped. A copy, because the originals are still wanted as they are -
+ * the panel's Liquipedia boxes and the link cache hold the real addresses.
+ * `changed` lists every rewrite, for the run log.
+ */
+function censorForThread(d, extra) {
+  var changed = [];
+  var name = function (s) {
+    var c = censorName(s);
+    if (s && c !== s) changed.push(s + ' -> ' + c);
+    return c;
+  };
+  var url = function (u, id) {
+    var c = censorUrl(u, id);
+    if (u && c !== u) changed.push(u + ' -> ' + c);
+    return c;
+  };
+  var opponents = function (list) {
+    return (list || []).map(function (o) { return Object.assign({}, o, { name: name(o.name) }); });
+  };
+  var titled = function (list) {
+    return list && list.map(function (h) { return Object.assign({}, h, { title: name(h.title) }); });
+  };
+
+  var copy = Object.assign({}, d, {
+    matchUrl: url(d.matchUrl),
+    event: Object.assign({}, d.event, { name: name(d.event.name), url: url(d.event.url) }),
+    teams: d.teams.map(function (t) {
+      return Object.assign({}, t, { name: name(t.name), url: url(t.url), urlPlain: url(t.urlPlain) });
+    }),
+    maps: d.maps.map(function (m) { return Object.assign({}, m, { statsUrl: url(m.statsUrl) }); }),
+    highlights: titled(d.highlights || []),
+    format: Object.assign({}, d.format, {
+      stage: name(d.format.stage),
+      outcomeSentences: (d.format.outcomeSentences || []).map(name)
+    })
+  });
+  var next = extra.next && Object.assign({}, extra.next, {
+    advance: extra.next.advance && Object.assign({}, extra.next.advance, {
+      round: name(extra.next.advance.round), opponents: opponents(extra.next.advance.opponents)
+    }),
+    drop: extra.next.drop && Object.assign({}, extra.next.drop, {
+      opponents: opponents(extra.next.drop.opponents)
+    })
+  });
+  return {
+    d: copy,
+    lp: extra.lp.map(function (t) {
+      return t && Object.assign({}, t, { name: name(t.name), url: url(t.url, t.articleId) });
+    }),
+    lpEventUrl: extra.lpe ? url(extra.lpe.url, liquipediaArticleId(extra.lpe.doc)) : '',
+    streams: (extra.streams || []).filter(function (s) {
+      if (!isGamblingLink(s.url)) return true;
+      changed.push('stream dropped: ' + s.url);
+      return false;
+    }).map(function (s) { return Object.assign({}, s, { label: name(s.label) }); }),
+    next: next,
+    highlights: titled(extra.highlights),
+    changed: changed
+  };
+}
+
 /* ---------------------------------------------------------------- generate */
 
 var busy = false;
 var lastKind = 'post';
 
+// opts.scheduled: the scheduler's job id. The run is the same, but nothing is
+// copied (this is a background tab, the clipboard is not ours to use) and the
+// result goes to opts.onDone instead of to a reddit tab opened from here.
 function generate(opts) {
   opts = opts || {};
   var kind = opts.kind || lastKind;
+  var done = opts.onDone || function () {};
   lastKind = kind;
-  if (busy) return;
+  if (busy) return done({ ok: false, error: 'a thread is already being generated in this tab' });
   busy = true;
   if (!panel) buildPanel();
   panel.classList.add('pmt-open');
   var titleLabel = panel.querySelector('.pmt-title-label');
   if (titleLabel) {
-    titleLabel.textContent = kind === 'live' ? 'Live Match Discussion Thread' : 'Post-Match Thread';
+    titleLabel.textContent = kind === 'live' ? 'Live Match Discussion Thread'
+      : opts.scheduled ? 'Post-Match Thread (scheduled)' : 'Post-Match Thread';
   }
   PMTLog.start(location.href);
+  if (opts.scheduled) PMTLog.info('scheduled run', { job: opts.scheduled });
   status('Reading match page…');
 
   var d;
@@ -492,7 +568,8 @@ function generate(opts) {
     PMTLog.error('scrapeMatch threw', e);
     busy = false;
     PMTLog.save();
-    return status('Could not read the match page: ' + e.message, true);
+    status('Could not read the match page: ' + e.message, true);
+    return done({ ok: false, error: 'could not read the match page: ' + e.message });
   }
   PMTLog.info('match page parsed', {
     kind: kind,
@@ -513,7 +590,8 @@ function generate(opts) {
   if (!d.teams[0] || !d.teams[0].name) {
     busy = false;
     PMTLog.save();
-    return status('This does not look like a match page.', true);
+    status('This does not look like a match page.', true);
+    return done({ ok: false, error: 'this does not look like a match page' });
   }
 
   var hlBox = document.getElementById('pmt-hl');
@@ -543,6 +621,7 @@ function generate(opts) {
   };
 
   var notes = [];
+  var result = null;   // what opts.onDone is handed at the end
   var soft = function (label) {
     return function (e) {
       PMTLog.error(label, e);
@@ -770,23 +849,45 @@ function generate(opts) {
       document.getElementById('pmt-lp-t1').value = (lp1 && lp1.url) || '';
       document.getElementById('pmt-lp-t2').value = (lp2 && lp2.url) || '';
 
-      var out = buildThread(d, {
+      // Gambling brands out, as late as possible: everything above (the
+      // bracket, the overtime rows, the flag directory) matches on the real
+      // names. The thread gets a censored copy; see censor.js.
+      var clean = censorForThread(d, { lp: [lp1, lp2], lpe: lpe, streams: streams, next: next,
+                                       highlights: highlights });
+      if (clean.changed.length) {
+        PMTLog.info('gambling brands kept out of the thread', { changed: clean.changed });
+      }
+
+      var out = buildThread(clean.d, {
         kind: kind,
-        lp: [lp1, lp2],
-        lpEventUrl: lpe && lpe.url,
-        streams: streams,
-        next: next,
+        lp: clean.lp,
+        lpEventUrl: clean.lpEventUrl,
+        streams: clean.streams,
+        next: clean.next,
         setting: ev && ev.setting,
         overtimes: overtimes,
-        highlights: highlights,
+        highlights: clean.highlights,
         logoOverrides: settings.logoOverrides
       });
+
+      // whatever the rules missed: say so, rather than let the filter find it
+      var gamblingLeft = gamblingTermsIn(out.title + '\n' + out.body);
+      if (gamblingLeft.length) {
+        PMTLog.warn('the thread still names a gambling brand', { terms: gamblingLeft });
+        notes.push('still names a gambling brand (' + gamblingLeft.join(', ') + ') - edit it out before posting');
+      }
 
       document.getElementById('pmt-title').value = out.title;
       document.getElementById('pmt-body').value = out.body;
       if (kind !== 'live' && !next) notes.push('no bracket entry - "advances to" line omitted');
       PMTLog.info('rendered', { titleLength: out.title.length, bodyLength: out.body.length, notes: notes });
+      result = { ok: true, title: out.title, body: out.body, notes: notes, gamblingLeft: gamblingLeft };
 
+      if (opts.scheduled) {
+        status('Built for the scheduled post - handing it to reddit.' +
+               (notes.length ? ' Missing: ' + notes.join('; ') + '.' : ''));
+        return;
+      }
       return copyText(out.body)
         .then(function () { return 'Body copied.'; })
         .catch(function () { return 'Copy blocked - use the Copy body button.'; })
@@ -804,14 +905,113 @@ function generate(opts) {
     .catch(function (e) {
       PMTLog.error('generate failed', e);
       status('Failed: ' + (e.message || e), true);
+      result = { ok: false, error: String(e.message || e) };
     })
     .then(function () {
       busy = false;
       PMTLog.info('run finished', PMTLog.counts());
       PMTLog.save();
       refreshDiagnostics();
+      done(result || { ok: false, error: 'the run ended without a thread' });
     });
 }
+
+/* ---------------------------------------------------------------- schedule */
+
+// The worker owns the jobs (scheduler.js); this button only shows the latest
+// one for this match, straight from storage, and follows it as it changes.
+var JOBS_KEY = 'pmt:jobs';
+var scheduleBtn = null;
+var scheduledJob = null;
+
+var SCHEDULE_LABELS = {
+  watching: 'Scheduled - waiting for the match to end',
+  generating: 'Scheduled - building the thread…',
+  submitting: 'Scheduled - posting to reddit…',
+  posted: 'Posted ✓ - open the thread',
+  attention: 'Scheduled thread needs you',
+  failed: 'Schedule failed - schedule again'
+};
+
+function matchIdHere() {
+  return (location.pathname.match(/^\/matches\/(\d+)(?:\/|$)/) || [])[1] || '';
+}
+
+function latestJobHere(jobs) {
+  var id = matchIdHere();
+  var best = null;
+  Object.keys(jobs || {}).forEach(function (k) {
+    var j = jobs[k];
+    if (j.matchId === id && (!best || j.createdAt > best.createdAt)) best = j;
+  });
+  return best;
+}
+
+function clockTime(ms) {
+  return ms ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+}
+
+function paintScheduleButton() {
+  if (!scheduleBtn) return;
+  var j = scheduledJob;
+  var state = j && j.state !== 'cancelled' ? j.state : '';
+  scheduleBtn.textContent = SCHEDULE_LABELS[state] || 'Schedule Post-Match Thread';
+  scheduleBtn.className = 'pmt-launch pmt-launch-schedule' + (state ? ' pmt-sched-' + state : '');
+  var tip = 'Keep refreshing this match until it is over, then build and post the thread automatically';
+  if (state === 'watching') {
+    tip = (j.lastCheckAt ? 'Last checked ' + clockTime(j.lastCheckAt) +
+           (j.lastSeen ? ' (' + j.lastSeen.phase + ')' : '') + '. ' : '') +
+          (j.nextCheckAt ? 'Next check around ' + clockTime(j.nextCheckAt) + '. ' : '') +
+          'Click to cancel.';
+  } else if (state === 'generating' || state === 'submitting') {
+    tip = 'Click to cancel.';
+  } else if (state === 'posted') {
+    tip = j.threadUrl || '';
+  } else if (state === 'attention' || state === 'failed') {
+    tip = j.error || '';
+  }
+  scheduleBtn.title = tip;
+}
+
+function onScheduleClick() {
+  var j = scheduledJob;
+  var state = j ? j.state : '';
+  if (state === 'watching' || state === 'generating' || state === 'submitting') {
+    if (!confirm('Cancel the scheduled post-match thread for this match?')) return;
+    chrome.runtime.sendMessage({ type: 'scheduleCancel', jobId: j.id });
+    return;
+  }
+  if (state === 'posted' || state === 'attention') {
+    chrome.runtime.sendMessage({ type: 'scheduleFocus', jobId: j.id });
+    return;
+  }
+  var label = document.title;
+  try {
+    var d = scrapeMatch(document, location.href);
+    if (d.teams[0].name && d.teams[1].name) {
+      label = d.teams[0].name + ' vs ' + d.teams[1].name + (d.event.name ? ' / ' + d.event.name : '');
+    }
+  } catch (e) { /* the worker relabels it on its first check anyway */ }
+  chrome.runtime.sendMessage({ type: 'scheduleAdd', url: location.href, label: label }, function (res) {
+    var err = chrome.runtime.lastError;
+    if (err || !res || !res.ok) {
+      alert('Could not schedule the thread: ' + ((res && res.error) || (err && err.message) || 'no reply'));
+    }
+  });
+}
+
+function loadScheduledJob() {
+  chrome.storage.local.get([JOBS_KEY], function (v) {
+    scheduledJob = latestJobHere(v && v[JOBS_KEY]);
+    paintScheduleButton();
+  });
+}
+
+chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area !== 'local' || !changes[JOBS_KEY]) return;
+  scheduledJob = latestJobHere(changes[JOBS_KEY].newValue);
+  paintScheduleButton();
+});
 
 /* -------------------------------------------------------------- entrypoint */
 
@@ -820,14 +1020,58 @@ if (document.querySelector('.teamsBox') && !document.querySelector('.pmt-launch-
   var liveBtn = el('button', 'pmt-launch pmt-launch-live', 'Live Match Discussion Thread');
   liveBtn.title = 'Generate the r/GlobalOffensive live match discussion thread';
   liveBtn.addEventListener('click', function () { generate({ kind: 'live' }); });
+  scheduleBtn = el('button', 'pmt-launch pmt-launch-schedule', 'Schedule Post-Match Thread');
+  scheduleBtn.addEventListener('click', onScheduleClick);
   var btn = el('button', 'pmt-launch', 'Post-Match Thread');
   btn.title = 'Generate the r/GlobalOffensive post-match thread';
   btn.addEventListener('click', function () { generate({ kind: 'post' }); });
   stack.appendChild(liveBtn);
+  stack.appendChild(scheduleBtn);
   stack.appendChild(btn);
   document.body.appendChild(stack);
+  paintScheduleButton();
+  loadScheduledJob();
 }
 
-chrome.runtime.onMessage.addListener(function (msg) {
-  if (msg && msg.type === 'generate') generate();
+// The watch tab is hidden, and Chrome freezes hidden tabs - it froze one
+// mid-build even outside the tab group, and a frozen tab runs nothing. Chrome
+// leaves a page alone while it holds a Web Lock, so the scheduled build holds
+// one, and lets go when it is done so an idle watch tab is frozen as usual.
+// The scheduler's build timeout and retry stay as the backstop.
+function holdAwake(name) {
+  var done = false;
+  var release = function () { done = true; };
+  if (navigator.locks && navigator.locks.request) {
+    navigator.locks.request(name, function () {
+      if (done) return null;
+      return new Promise(function (resolve) { release = resolve; });
+    }).catch(function () {});
+  }
+  return { release: function () { done = true; release(); } };
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg) return false;
+  if (msg.type === 'generate') generate();
+  if (msg.type === 'scheduledGenerate') {
+    // answered straight away - the build takes a while, and its result comes
+    // back as a message of its own, which keeps the worker awake for it
+    if (busy) {
+      sendResponse({ accepted: false, error: 'a thread is already being generated in this tab' });
+      return false;
+    }
+    sendResponse({ accepted: true });
+    var awake = holdAwake('pmt-build-' + msg.jobId);
+    generate({
+      kind: 'post',
+      noOpen: true,
+      scheduled: msg.jobId,
+      onDone: function (res) {
+        awake.release();
+        chrome.runtime.sendMessage(Object.assign({ type: 'scheduledThread', jobId: msg.jobId }, res),
+          function () { void chrome.runtime.lastError; });
+      }
+    });
+  }
+  return false;
 });

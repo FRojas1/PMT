@@ -135,13 +135,47 @@ function tabStillOpen(tabId) {
   });
 }
 
-function createOurTab(resolve, reject) {
-  chrome.tabs.create({ url: 'about:blank', active: false }, function (created) {
-    if (chrome.runtime.lastError || !created) {
-      return reject(new Error(chrome.runtime.lastError
-        ? chrome.runtime.lastError.message
-        : 'could not open a background tab'));
+/*
+ * Chrome refuses every tab edit - create, update, reload, remove, group - while
+ * it considers the tab strip busy, with "Tabs cannot be edited right now (user
+ * may be dragging a tab)". A drag is one cause; the moment after a tab is
+ * clicked is another, so it turns up with nobody dragging anything: it is how
+ * a scheduled thread's submit page once failed to open while the user sat on
+ * some other tab. It passes within moments, so an edit refused that way is
+ * tried again, for up to half a minute, before the error is let through.
+ *
+ * `call(cb)` makes the chrome.tabs call with `cb` as its callback; `done(err,
+ * result)` gets the outcome, with the error passed in explicitly because
+ * chrome.runtime.lastError is only readable inside the callback itself.
+ */
+var TAB_STRIP_BUSY = /cannot be edited right now|dragging a tab/i;
+var TAB_EDIT_PATIENCE_MS = 30000;
+
+function tabEdit(call, done, waited) {
+  waited = waited || 0;
+  call(function (result) {
+    var err = chrome.runtime.lastError;
+    if (err && TAB_STRIP_BUSY.test(err.message) && waited < TAB_EDIT_PATIENCE_MS) {
+      return setTimeout(function () { tabEdit(call, done, waited + 250); }, 250);
     }
+    done(err ? new Error(err.message) : null, result);
+  });
+}
+
+function tabEditP(call) {
+  return new Promise(function (resolve, reject) {
+    tabEdit(call, function (err, result) {
+      if (err) reject(err);
+      else resolve(result);
+    });
+  });
+}
+
+function createOurTab(resolve, reject) {
+  tabEdit(function (cb) {
+    chrome.tabs.create({ url: 'about:blank', active: false }, cb);
+  }, function (err, created) {
+    if (err || !created) return reject(err || new Error('could not open a background tab'));
     tab = { id: created.id, ours: true };
     resolve(tab);
   });
@@ -195,10 +229,7 @@ function releaseTab() {
     closeTimer = null;
     if (tabUsers > 0 || !tab || !tab.ours) return;
     var id = tab.id;
-    chrome.tabs.remove(id, function () {
-      void chrome.runtime.lastError;
-      forgetTab(id);
-    });
+    tabEdit(function (cb) { chrome.tabs.remove(id, cb); }, function () { forgetTab(id); });
   }, TAB_IDLE_MS);
 }
 
@@ -213,6 +244,24 @@ function runWithTab(work) {
 // the tab's current "complete" as success, which is the page we are leaving
 // whenever the shared tab is reused.
 function navigate(tabId, url) {
+  return loadTab(tabId, function (done) {
+    tabEdit(function (cb) { chrome.tabs.update(tabId, { url: url }, cb); }, done);
+  }, url);
+}
+
+// A load that never reports complete is given up on after this long and the
+// page read as it stands; the scheduler checks that what it reads is new.
+var LOAD_TIMEOUT_MS = 20000;
+
+// There is deliberately no reload helper: reloading a page that was the answer
+// to a POST (as one is after Cloudflare's challenge) stops on Chrome's "Confirm
+// Form Resubmission" dialog. The scheduler navigates to a fresh address instead.
+
+// `start` kicks the load off and calls back with (err, tab); `url`, when
+// given, is what lets a no-op navigation to the current page finish. The load
+// timeout only starts once Chrome has accepted the edit - a busy tab strip can
+// hold that up for a while, and the page then still has its whole load ahead.
+function loadTab(tabId, start, url) {
   return new Promise(function (resolve, reject) {
     var settled = false;
     var seenLoading = false;
@@ -235,14 +284,13 @@ function navigate(tabId, url) {
     }
     chrome.tabs.onUpdated.addListener(onUpdated);
     chrome.tabs.onRemoved.addListener(onRemoved);
-    var timer = setTimeout(function () { finish(); }, 20000);
-    chrome.tabs.update(tabId, { url: url }, function (t) {
-      if (chrome.runtime.lastError) {
-        return finish(new Error(chrome.runtime.lastError.message));
-      }
+    var timer = null;
+    start(function (err, t) {
+      if (err) return finish(err);
+      if (!settled) timer = setTimeout(function () { finish(); }, LOAD_TIMEOUT_MS);
       if (t && t.status === 'loading') seenLoading = true;
       // already on this URL (or the update was a no-op): nothing will load
-      if (t && t.status === 'complete' && samePage(t.url, url)) finish();
+      if (url && t && t.status === 'complete' && samePage(t.url, url)) finish();
     });
   });
 }
@@ -675,7 +723,9 @@ function fetchPageInTab(url) {
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (msg && msg.type === 'openTab') {
-    chrome.tabs.create({ url: msg.url, index: (sender.tab ? sender.tab.index + 1 : undefined) });
+    tabEdit(function (cb) {
+      chrome.tabs.create({ url: msg.url, index: (sender.tab ? sender.tab.index + 1 : undefined) }, cb);
+    }, function () {});
     sendResponse({ ok: true });
     return false;
   }
@@ -698,3 +748,7 @@ chrome.action.onClicked.addListener(function (tab) {
     chrome.tabs.sendMessage(tab.id, { type: 'generate' });
   }
 });
+
+// "Schedule Post-Match Thread": watch a match until it ends, then post it.
+// Shares this file's tab helpers, so it is loaded last.
+importScripts('scheduler.js');

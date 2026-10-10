@@ -9,7 +9,7 @@ Two thread formats are supported, each as its own self-contained extension.
 
 | | Format | Extension |
 |---|---|---|
-| **New** | Liquipedia-enriched: rosters, coaches, social links, event streams, and "advances to … and will face …" from the bracket | [`new_format/extension/`](new_format/extension/) |
+| **New** | Liquipedia-enriched: rosters, coaches, social links, event streams, and "advances to … and will face …" from the bracket. Can also be scheduled: it watches the match and posts the thread itself when the match ends | [`new_format/extension/`](new_format/extension/) |
 | **Old** | HLTV-only: the original layout | [`old_format/extension/`](old_format/extension/) |
 
 Each folder has its own README covering install, data sources, and the
