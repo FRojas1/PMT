@@ -16,10 +16,12 @@
 
 var ROLE_IGL = '♛';   // ♛
 var ROLE_AWP = '⊕';   // ⊕
-var FOOTER =
-  '[**This thread was created by the Post-Match Team.**]' +
-  '(https://docs.google.com/spreadsheets/d/1k5TiV7VuDKLa41MfcDgP1XiBkPvAo_HInRmNlKKEIBM/edit?usp=sharing)  \n' +
-  'Want to help post these threads? Message /u/Undercover-Cactus to join the Post-Match Team.   ';
+var FOOTER =           // Footer for the Post-Match Thread - Provides PMT links and encourages new members to join
+  '**This thread was created by the Post-Match Team.**  \n' +
+  '[**PMT Discord**](https://discord.gg/X6Pn2jbmJc) | ' + // PMT Discord invite link
+  '[**PMT Creator**](https://postmatchteam.uk) | ' + // Could eventually be replaced by a link to download the extension once that is publicly and easily available - though it's possible we may also want to keep the extension more private
+  '[**PMT Archive**](https://docs.google.com/spreadsheets/d/1k5TiV7VuDKLa41MfcDgP1XiBkPvAo_HInRmNlKKEIBM/edit?usp=sharing)  \n' + // Archive of previous match threads. Once password protection is added to main schedule, that should also be linked
+  'The PMT is always looking for help! If you\'d want to help contribute, message u/Undercover-Cactus on Reddit, or join the Discord (encouraged but not required).  ';
 
 var ROLE_SYMBOL = { igl: ROLE_IGL, awp: ROLE_AWP };
 
