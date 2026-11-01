@@ -24,7 +24,8 @@ function normalizeTeamName(name) {
   var aliases = {
     navi: 'natusvincere',
     innercircle: 'ic',
-    nip: 'ninjasinpyjamas'
+    nip: 'ninjasinpyjamas',
+    '1w': '1win'
   };
 
   return aliases[normalized] || normalized;
