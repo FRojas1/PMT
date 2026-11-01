@@ -52,7 +52,7 @@ var REQUIRED_FLAIR = 'Discussion | Esports';
 var ACTIVE_STATES = ['watching', 'generating', 'submitting'];
 var FINISHED_STATES = ['posted', 'failed', 'cancelled'];
 
-var STATS_GRACE_MS = 5 * 60000;       // after "Match over", how long to wait for the stats tables
+var STATS_GRACE_MS = 1 * 60000;       // after "Match over", how long to wait for the stats tables
 var MAP3_UPDATE_WINDOW_MS = 60 * 60000; // after posting, allow one hour for missing stats
 var MAP3_CHECK_MS = 60000;
 var MAP3_EDIT_TIMEOUT_MS = 3 * 60000;
