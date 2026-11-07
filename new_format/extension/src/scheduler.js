@@ -45,9 +45,7 @@ var SCHEDULE_DEFAULTS = {
   checkMinutes: 1,
   autoSubmit: true
 };
-// the subreddit removes an unflaired post-match thread, so a scheduled one is
-// always flaired even when the manual flow has been told not to bother
-var REQUIRED_FLAIR = 'Discussion | Esports';
+// Scheduled flair is optional: some test subreddits have no post flairs.
 
 var ACTIVE_STATES = ['watching', 'generating', 'submitting'];
 var FINISHED_STATES = ['posted', 'failed', 'cancelled'];
@@ -57,6 +55,9 @@ var MAP3_UPDATE_WINDOW_MS = 60 * 60000; // after posting, allow one hour for mis
 var MAP3_CHECK_MS = 60000;
 var MAP3_EDIT_TIMEOUT_MS = 3 * 60000;
 var MAP3_MAX_EDIT_ATTEMPTS = 3;
+var LIVE_MAX_MONITOR_MS = 18 * 3600000;   // guard against endlessly live/abandoned matches
+var LIVE_POST_LEAD_MS = 5 * 60000;    // create the discussion before the scheduled start
+var LIVE_FINAL_WINDOW_MS = 60 * 60000; // allow delayed stats after Match over
 var BUILD_TIMEOUT_MS = 5 * 60000;     // no word from the match page by then: build again
 var SUBMIT_TIMEOUT_MS = 10 * 60000;   // no thread by then: hand it to a person
 var UNSEEN_SUBMIT_MS = 2 * 60000;     // the submit page has not even asked for its thread by then
@@ -159,10 +160,11 @@ function matchIdOf(url) {
   return (/^https:\/\/www\.hltv\.org\/matches\/(\d+)(?:[/?#]|$)/.exec(url || '') || [])[1] || '';
 }
 
-function latestJobFor(jobs, matchId) {
+function latestJobFor(jobs, matchId, kind) {
   var best = null;
   jobList(jobs).forEach(function (j) {
-    if (j.matchId === matchId && (!best || j.createdAt > best.createdAt)) best = j;
+    if (j.matchId === matchId && (j.kind || 'post') === (kind || 'post') &&
+        (!best || j.createdAt > best.createdAt)) best = j;
   });
   return best;
 }
@@ -456,6 +458,7 @@ function readMatchState() {
   var cd = document.querySelector('.timeAndEvent .countdown');
   var time = document.querySelector('.timeAndEvent .time[data-unix]');
   var countdown = txt(cd);
+  var matchOver = /match over/i.test(countdown);
   var scoreOf = function (n) {
     var g = '.team' + n + '-gradient ';
     return txt(box && box.querySelector(g + '.won, ' + g + '.lost, ' + g + '.tie'));
@@ -464,15 +467,30 @@ function readMatchState() {
     '.team1-gradient .won, .team2-gradient .won, .team1-gradient .tie, .team2-gradient .tie'));
 
   var missing = [];
+  var finished = [];
   
 Array.prototype.forEach.call(document.querySelectorAll('.mapholder'), function (h) {
   var over = h.querySelector('.results-left.won, .results-left.lost, .results-right.won, .results-right.lost');
   var a = h.querySelector('.results-center-stats a');
   var id = ((a && a.getAttribute('href')) || '').match(/\/mapstatsid\/(\d+)\//);
 
-  if (!over) return;
+  // won/lost also marks a halftime leader. Use the same final-score rule as
+  // scrapeMaps in hltv.js so a partial score cannot trigger a Reddit update
+  // or become a supposedly finished map with missing statistics.
+  var left = parseInt(txt(h.querySelector('.results-left .results-team-score')), 10);
+  var right = parseInt(txt(h.querySelector('.results-right .results-team-score')), 10);
+  var high = Math.max(left, right);
+  var low = Math.min(left, right);
+  var finalScore = (high === 13 && low <= 11) ||
+    (high >= 16 && (high - 16) % 3 === 0 && low >= high - 4 && low <= high - 2);
+  if (!over || !(low >= 0 && (matchOver || finalScore))) return;
 
   var mapName = txt(h.querySelector('.mapname'));
+   var statsTab = id && document.getElementById(id[1] + '-content');
+   var statsReady = !!(statsTab && statsTab.querySelector('table.totalstats'));
+   finished.push([finished.length, mapName,
+     txt(h.querySelector('.results-left')), txt(h.querySelector('.results-right')),
+     id ? id[1] : '', statsReady ? 'ready' : 'pending'].join(':'));
 
   // Map is finished, but the stats link is missing
   if (!id) {
@@ -501,14 +519,16 @@ Array.prototype.forEach.call(document.querySelectorAll('.mapholder'), function (
     unix: parseInt((cd && cd.getAttribute('data-unix')) ||
                    (time && time.getAttribute('data-unix')) || '0', 10) || 0,
     live: !!(cd && (cd.classList.contains('countdown-live') || /^live$/i.test(countdown))),
-    over: /match over/i.test(countdown) || decided,
+    over: matchOver || decided,
     deleted: /deleted|cancel/i.test(countdown),
     teams: box ? Array.prototype.map.call(box.querySelectorAll('.teamName'), txt).slice(0, 2) : [],
     score: [scoreOf(1), scoreOf(2)],
     event: txt(document.querySelector('.timeAndEvent .event a')),
     statsReady: allTables >= 2 && !missing.length,
     statsTables: allTables,
-    mapsMissingStats: missing
+    mapsMissingStats: missing,
+    finishedMaps: finished.length,
+    finishedMapSignature: finished.join('|')
   };
 }
 
@@ -659,6 +679,31 @@ function judge(id, tabId, s, settings) {
 
     if (s.deleted) return failJob(j, 'HLTV says "' + s.countdown + '"');
 
+    if (j.kind === 'live') {
+      // Never create a 'live' discussion for a match that already ended.
+      if (s.over) return failJob(j, 'the match ended before the live discussion was posted');
+      var liveStart = j.lastSeen.unix;
+      if (s.live || (liveStart > 0 && now >= liveStart - LIVE_POST_LEAD_MS)) {
+        j.liveSince = now;
+        j.liveInitialSignature = s.finishedMapSignature || '';
+        j.state = 'generating';
+        j.buildStartedAt = now;
+        j.buildAttempts = (j.buildAttempts || 0) + 1;
+        jobNote(j, s.live ? 'match is live; building live discussion' :
+          'match starts within five minutes; building live discussion', { attempt: j.buildAttempts });
+        build = true;
+        return;
+      }
+      if (now - Math.max(j.createdAt, liveStart) > GIVE_UP_MS) {
+        return failJob(j, 'match did not go live within 12 hours of its expected start');
+      }
+      if (liveStart - now > FAR_OFF_MS) {
+        j.nextCheckAt = now + Math.min(30 * 60000, liveStart - now - LIVE_POST_LEAD_MS);
+      } else if (liveStart > 0) {
+        j.nextCheckAt = Math.min(j.nextCheckAt, liveStart - LIVE_POST_LEAD_MS);
+      }
+      return;
+    }
     if (s.over) {
       if (!j.overSince) j.overSince = now;
       // A thread posted without the stats tables is missing most of its body,
@@ -710,7 +755,7 @@ function judge(id, tabId, s, settings) {
 /* ------------------------------------------------------------- the build */
 
 function requestBuild(job, tabId) {
-  return sendToTab(tabId, { type: 'scheduledGenerate', jobId: job.id }, 15).then(function (res) {
+  return sendToTab(tabId, { type: 'scheduledGenerate', jobId: job.id, kind: job.kind || 'post' }, 15).then(function (res) {
     if (!res || !res.accepted) throw new Error((res && res.error) || 'no answer');
   }).catch(function (e) {
     return buildFailed(job.id, 'the match page would not start the build: ' + errorText(e));
@@ -756,7 +801,7 @@ function threadBuilt(msg) {
     return updateJob(msg.jobId, function (j) {
       if (j.state === 'failed') late = true;
       // a build that outlived its timeout but beat the retry is as good as any
-      var slow = j.state === 'watching' && !!j.overSince;
+      var slow = j.state === 'watching' && (j.kind === 'live' ? !!j.liveSince : !!j.overSince);
       if (j.state !== 'generating' && !slow) return;
       if (slow) jobNote(j, 'a build that had timed out reported in after all - using it');
       j.title = msg.title;
@@ -764,7 +809,7 @@ function threadBuilt(msg) {
       j.notes = msg.notes || [];
       j.gamblingLeft = msg.gamblingLeft || [];
       j.subreddit = settings.subreddit || SCHEDULE_DEFAULTS.subreddit;
-      j.flair = settings.flair || REQUIRED_FLAIR;
+      j.flair = typeof settings.flair === 'string' ? settings.flair.trim() : '';
       j.state = 'submitting';
       j.submitOpenedAt = Date.now();
       j.submitPageSeenAt = undefined;
@@ -917,7 +962,14 @@ function submitLanded(msg, sender) {
     hit.threadUrl = msg.url;
     hit.error = undefined;
     jobNote(hit, 'posted', { url: msg.url });
-    if (hit.map3EditStatus === 'armed') {
+    if (hit.kind === 'live') {
+      // Keep the original Reddit post; all later work is an edit, never another submit.
+      hit.livePublishedSignature = hit.liveInitialSignature || '';
+      hit.map3EditStatus = 'waiting';
+      hit.map3EditDeadline = Date.now() + LIVE_MAX_MONITOR_MS;
+      hit.map3EditNextAt = Date.now() + MAP3_CHECK_MS;
+      jobNote(hit, 'live discussion posted; checking for each finished map');
+    } else if (hit.map3EditStatus === 'armed') {
       hit.map3EditStatus = 'waiting';
       hit.map3EditDeadline = Date.now() + MAP3_UPDATE_WINDOW_MS;
       hit.map3EditNextAt = Date.now() + MAP3_CHECK_MS;
@@ -993,6 +1045,8 @@ function submitPageSilent(job) {
 // An edit is allowed only on its original Reddit post and only if the current
 // body still equals the one PMT originally posted. See reddit.js.
 function closeMap3EditTab(job) {
+  // Live updates reuse the thread tab, including the original submit tab.
+  if (job && job.kind === 'live') return Promise.resolve();
   return getTab(job && job.map3EditTabId).then(function (t) {
     if (t && /^https:\/\/(old\.|www\.)reddit\.com\/r\/[^/]+\/comments\//.test(t.url || '')) {
       tabEdit(function (cb) { chrome.tabs.remove(t.id, cb); }, function () {});
@@ -1004,10 +1058,10 @@ function map3Stop(id, why) {
     if (j.state !== 'posted' || ['waiting', 'building', 'editing'].indexOf(j.map3EditStatus) < 0) return;
     j.map3EditStatus = 'stopped';
     j.map3EditNextAt = null;
-    jobNote(j, 'Stats update stopped: ' + why);
+    jobNote(j, (j.kind === 'live' ? 'Live monitoring stopped: ' : 'Stats update stopped: ') + why);
   }).then(function (j) {
     if (j && j.map3EditStatus === 'stopped') {
-      notify(j, 'Stats update stopped', why);
+      notify(j, j.kind === 'live' ? 'Live monitoring stopped' : 'Stats update stopped', why);
       return Promise.all([closeWatchTab(j), closeMap3EditTab(j)]);
     }
   });
@@ -1016,13 +1070,14 @@ function checkPostedMap3(job) {
   var id = job.id;
   checking[id] = true;
   var shouldBuild = false;
+  var startedAt = Date.now();
   return watchTab(job).then(function (w) {
-    return readMatchStateSettled(w.tabId, w.token).then(function (s) {
+    return readMatchStateSettled(w.tabId, w.token, job.matchId, startedAt).then(function (s) {
       return updateJob(id, function (j) {
         if (j.state !== 'posted' || j.map3EditStatus !== 'waiting') return;
         j.watchTabId = w.tabId;
         j.map3EditNextAt = Date.now() + MAP3_CHECK_MS;
-        if (s.stale || s.challenged || !s.isMatchPage || !s.over) {
+        if (s.stale || s.challenged || !s.isMatchPage || (j.kind !== 'live' && !s.over)) {
           j.map3EditErrors = (j.map3EditErrors || 0) + 1;
           if (j.map3EditErrors >= 2) j.replaceWatchTab = true;
           if (j.map3EditErrors >= 10) {
@@ -1034,6 +1089,34 @@ function checkPostedMap3(job) {
           return;
         }
         j.map3EditErrors = 0;
+        if (j.kind === 'live') {
+          if (s.deleted) {
+            j.map3EditStatus = 'stopped';
+            jobNote(j, 'Live monitoring stopped: match was deleted or cancelled');
+            return;
+          }
+          if (s.over && !j.liveOverSince) {
+            j.liveOverSince = Date.now();
+            j.map3EditDeadline = Math.min(j.map3EditDeadline,
+              j.liveOverSince + LIVE_FINAL_WINDOW_MS);
+            jobNote(j, 'match finished; checking the final map and delayed statistics');
+          }
+          var signature = s.finishedMapSignature || '';
+          if (signature === (j.livePublishedSignature || '')) {
+            if (s.over && s.statsReady) {
+              j.map3EditStatus = 'done';
+              jobNote(j, 'Live discussion finalized: every completed map is current');
+            }
+            return;
+          }
+          j.livePendingSignature = signature;
+          j.map3EditStatus = 'building';
+          j.map3EditStartedAt = Date.now();
+          shouldBuild = true;
+          jobNote(j, 'completed map changed; regenerating live discussion',
+            { finishedMaps: s.finishedMaps, missingStats: s.mapsMissingStats });
+          return;
+        }
         if (!s.statsReady) {
           // Avoid a log line every minute while HLTV is still updating.
           if (!j.map3EditLastWaitingLog || Date.now() - j.map3EditLastWaitingLog >= 5 * 60000) {
@@ -1048,10 +1131,10 @@ function checkPostedMap3(job) {
         jobNote(j, 'All statistics available; regenerating thread');
       }).then(function (j) {
         if (!j) return;
-        if (j.map3EditStatus === 'stopped') return closeWatchTab(j);
+        if (j.map3EditStatus === 'stopped' || j.map3EditStatus === 'done') return closeWatchTab(j);
         if (shouldBuild && j.map3EditStatus === 'building') {
           return ungroupTab(w.tabId).then(function () {
-            return sendToTab(w.tabId, { type: 'scheduledRegenerate', jobId: id }, 15);
+            return sendToTab(w.tabId, { type: 'scheduledRegenerate', jobId: id, kind: j.kind || 'post' }, 15);
           }).then(function (r) {
             if (!r || !r.accepted) throw new Error((r && r.error) || 'no response from the match tab');
           }).catch(function (e) { return map3BuildFailed(id, errorText(e)); });
@@ -1124,14 +1207,35 @@ function startMap3Edit(job) {
     var target = validRedditThread(j);
     if (!target) return map3Stop(j.id, 'invalid or wrong-subreddit thread URL');
     if (!started) return;
-    return closeMap3EditTab({ map3EditTabId: priorEditTabId }).then(function () {
-      return openScheduledTab('https://old.reddit.com' + target.path + '#pmt-edit=' + encodeURIComponent(j.id), {
+    var editUrl = 'https://old.reddit.com' + target.path +
+      '?pmt-edit-check=' + Date.now() + '#pmt-edit=' + encodeURIComponent(j.id);
+    function rememberEditTab(tabId) {
+      return updateJob(j.id, function (x) {
+        if (x.state === 'posted' && x.map3EditStatus === 'editing') x.map3EditTabId = tabId;
+      });
+    }
+    var reusable = j.kind === 'live' ? new Promise(function (resolve, reject) {
+      chrome.tabs.query({ url: ['https://old.reddit.com/*', 'https://www.reddit.com/*'] }, function (tabs) {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        var matches = (tabs || []).filter(function (t) {
+          var thread = validRedditThread({ threadUrl: t.url, subreddit: j.subreddit });
+          return thread && thread.fullname === target.fullname;
+        });
+        resolve(matches.find(function (t) { return t.id === priorEditTabId; }) ||
+          matches.find(function (t) { return t.id === j.submitTabId; }) || matches[0] || null);
+      });
+    }) : Promise.resolve(null);
+    return reusable.then(function (tab) {
+      if (tab) {
+        return rememberEditTab(tab.id).then(function () {
+          return ungroupTab(tab.id);
+        }).then(function () { return navigate(tab.id, editUrl); });
+      }
+      return closeMap3EditTab({ kind: j.kind, map3EditTabId: priorEditTabId }).then(function () {
+        return openScheduledTab(editUrl, {
         grouped: false,
-        created: function (tabId) {
-          return updateJob(j.id, function (x) {
-            if (x.state === 'posted' && x.map3EditStatus === 'editing') x.map3EditTabId = tabId;
-          });
-        }
+        created: rememberEditTab
+        });
       });
     }).catch(function (e) { return map3EditFailed(j.id, 'could not open Reddit: ' + errorText(e), false); });
   });
@@ -1146,9 +1250,18 @@ function map3Regenerated(msg) {
       jobNote(j, 'Stats update stopped: regenerated body contains a blocked term');
       finished = true;
     } else if (msg.body === j.body) {
-      j.map3EditStatus = 'done';
-      jobNote(j, 'Statistics ready, but generated body was already current; no edit needed');
-      finished = true;
+      if (j.kind === 'live') {
+        // HLTV may report a new stats link before the body visibly changes.
+        j.livePublishedSignature = j.livePendingSignature || '';
+        j.map3EditStatus = 'waiting';
+        j.map3EditNextAt = Date.now() + MAP3_CHECK_MS;
+        j.map3BuildErrors = 0;
+        jobNote(j, 'live content unchanged; continuing map monitoring');
+      } else {
+        j.map3EditStatus = 'done';
+        jobNote(j, 'Statistics ready, but generated body was already current; no edit needed');
+        finished = true;
+      }
     } else {
       j.map3UpdatedBody = msg.body;
       j.map3EditStatus = 'editing';
@@ -1160,6 +1273,7 @@ function map3Regenerated(msg) {
     if (!j) return;
     if (finished) return closeWatchTab(j);
     if (startEdit) return regroupTab(j.watchTabId).then(function () { return startMap3Edit(j); });
+    if (j.kind === 'live' && j.map3EditStatus === 'waiting') return regroupTab(j.watchTabId);
   });
 }
 function jobForMap3Edit(msg, sender) {
@@ -1213,12 +1327,22 @@ function map3EditResult(msg, sender) {
         tabId == null || tabId !== j.map3EditTabId) return;
     j.body = j.map3UpdatedBody;
     j.map3UpdatedBody = undefined;
-    j.map3EditStatus = 'done';
-    j.map3EditNextAt = null;
-    jobNote(j, 'Reddit thread updated with available statistics', { url: j.threadUrl });
+    j.map3EditStatus = j.kind === 'live' ? 'waiting' : 'done';
+    j.map3EditNextAt = j.kind === 'live' ? Date.now() + MAP3_CHECK_MS : null;
+    if (j.kind === 'live') {
+      j.livePublishedSignature = j.livePendingSignature || '';
+      j.map3EditAttempts = 0;  // per-map retries, not lifetime attempts
+      j.map3BuildErrors = 0;
+    }
+    jobNote(j, j.kind === 'live' ? 'Live discussion updated on Reddit' :
+      'Reddit thread updated with available statistics', { url: j.threadUrl });
     done = true;
   }).then(function (j) {
     if (!done) return;
+    if (j.kind === 'live') {
+      notify(j, 'Live discussion updated', j.title || j.label);
+      return Promise.all([closeMap3EditTab(j), regroupTab(j.watchTabId)]);
+    }
     notify(j, 'Post-match thread updated', j.title || j.label);
     return Promise.all([closeWatchTab(j), closeMap3EditTab(j)]);
   });
@@ -1258,7 +1382,8 @@ function tick() {
         }
       } else if (j.state === 'posted' && ['waiting', 'building', 'editing'].indexOf(j.map3EditStatus) >= 0) {
         if (now >= (j.map3EditDeadline || 0)) {
-          work.push(map3Stop(j.id, '60-minute stats monitoring window expired'));
+          work.push(map3Stop(j.id, j.kind === 'live' ?
+             'live monitoring time limit reached' : '60-minute stats monitoring window expired'));
         } else if (j.map3EditStatus === 'waiting' &&
                    now >= (j.map3EditNextAt || 0) && !checking[j.id]) {
           work.push(checkPostedMap3(j));
@@ -1306,7 +1431,8 @@ function notify(job, title, message) {
 
 // A job's outcome, said once when it gets there.
 function announce(job) {
-  if (job.state === 'posted') notify(job, 'Post-match thread posted', job.title || job.label);
+  if (job.state === 'posted') notify(job, job.kind === 'live' ?
+    'Live discussion posted' : 'Post-match thread posted', job.title || job.label);
   else if (job.state === 'attention') notify(job, 'Scheduled thread needs you', job.label + ': ' + job.error);
   else if (job.state === 'failed') notify(job, 'Scheduled thread gave up', job.label + ': ' + job.error);
 }
@@ -1339,12 +1465,13 @@ if (chrome.notifications) {
   });
 }
 
-function addJob(url, label) {
+function addJob(url, label, kind) {
+  kind = kind === 'live' ? 'live' : 'post';
   var matchUrl = String(url || '').split('#')[0].split('?')[0];
   var matchId = matchIdOf(matchUrl);
   if (!matchId) return Promise.resolve({ ok: false, error: 'not an HLTV match page' });
   return withJobs(function (jobs) {
-    var current = latestJobFor(jobs, matchId);
+    var current = latestJobFor(jobs, matchId, kind);
     // one job per match; only a failed or cancelled one can be scheduled again
     if (current && current.state !== 'failed' && current.state !== 'cancelled') {
       return { ok: true, job: current, existed: true };
@@ -1353,6 +1480,7 @@ function addJob(url, label) {
     var job = {
       id: matchId + '-' + now.toString(36),
       matchId: matchId,
+      kind: kind,
       matchUrl: matchUrl,
       label: label || matchUrl,
       state: 'watching',
@@ -1363,7 +1491,7 @@ function addJob(url, label) {
       buildAttempts: 0,
       log: []
     };
-    jobNote(job, 'scheduled', { url: matchUrl });
+    jobNote(job, 'scheduled ' + kind + ' thread', { url: matchUrl });
     jobs[job.id] = job;
     return { ok: true, job: JSON.parse(JSON.stringify(job)) };
   }).then(function (res) {
@@ -1417,7 +1545,8 @@ function removeJob(id) {
 }
 
 var SCHEDULE_HANDLERS = {
-  scheduleAdd: function (msg) { return addJob(msg.url, msg.label); },
+  scheduleAdd: function (msg) { return addJob(msg.url, msg.label, msg.kind); },
+  scheduleStopUpdates: function (msg) { return map3Stop(msg.jobId, 'stopped by user').then(function () { return { ok: true }; }); },
   scheduleCancel: function (msg) { return cancelJob(msg.jobId); },
   scheduleRetry: function (msg) { return retryJob(msg.jobId); },
   scheduleRemove: function (msg) { return removeJob(msg.jobId); },

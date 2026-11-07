@@ -810,9 +810,12 @@ function generate(opts) {
       if (kind !== 'live' && lpe) {
         var names = [[d.teams[0].name, lp1 && lp1.name], [d.teams[1].name, lp2 && lp2.name]];
         var scores = [String(d.teams[0].score), String(d.teams[1].score)];
-        next = nextRound(lpe.doc, names, scores);
+        next = nextRound(lpe.doc, names, scores, {
+          matchId: d.matchId, matchTime: d.matchTime, stage: d.format.stage
+        });
         PMTLog.info('bracket lookup', {
-          searchedFor: names, scores: scores, brackets: lpe.doc.querySelectorAll('.brkts-bracket').length,
+          searchedFor: names, scores: scores, matchId: d.matchId, matchTime: d.matchTime, stage: d.format.stage,
+          brackets: lpe.doc.querySelectorAll('.brkts-bracket').length,
           matches: lpe.doc.querySelectorAll('.brkts-match').length, result: next
         });
       }
@@ -936,66 +939,61 @@ function generate(opts) {
 
 /* ---------------------------------------------------------------- schedule */
 
-// The worker owns the jobs (scheduler.js); this button only shows the latest
-// one for this match, straight from storage, and follows it as it changes.
+// Both thread types are independent jobs. Old saved jobs have no kind and are post-match.
 var JOBS_KEY = 'pmt:jobs';
-var scheduleBtn = null;
-var scheduledJob = null;
-
-var SCHEDULE_LABELS = {
-  watching: 'Scheduled - waiting for the match to end',
-  generating: 'Scheduled - building the thread…',
-  submitting: 'Scheduled - posting to reddit…',
-  posted: 'Posted ✓ - open the thread',
-  attention: 'Scheduled thread needs you',
-  failed: 'Schedule failed - schedule again'
-};
+var scheduleButtons = { live: null, post: null };
+var scheduledJobs = { live: null, post: null };
 
 function matchIdHere() {
   return (location.pathname.match(/^\/matches\/(\d+)(?:\/|$)/) || [])[1] || '';
 }
-
-function latestJobHere(jobs) {
+function latestJobHere(jobs, kind) {
   var id = matchIdHere();
   var best = null;
   Object.keys(jobs || {}).forEach(function (k) {
     var j = jobs[k];
-    if (j.matchId === id && (!best || j.createdAt > best.createdAt)) best = j;
+    if (j.matchId === id && (j.kind || 'post') === kind &&
+        (!best || j.createdAt > best.createdAt)) best = j;
   });
   return best;
 }
-
 function clockTime(ms) {
   return ms ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 }
-
-function paintScheduleButton() {
-  if (!scheduleBtn) return;
-  var j = scheduledJob;
+function paintScheduleButton(kind) {
+  var button = scheduleButtons[kind];
+  if (!button) return;
+  var j = scheduledJobs[kind];
   var state = j && j.state !== 'cancelled' ? j.state : '';
-  scheduleBtn.textContent = SCHEDULE_LABELS[state] || 'Schedule Post-Match Thread';
-  scheduleBtn.className = 'pmt-launch pmt-launch-schedule' + (state ? ' pmt-sched-' + state : '');
-  var tip = 'Keep refreshing this match until it is over, then build and post the thread automatically';
+  var label = kind === 'live' ? 'Schedule Live Match Discussion' : 'Schedule Post-Match Thread';
+  if (state === 'watching') label = kind === 'live' ? 'Scheduled - posts 5 minutes before start' : 'Scheduled - waiting for match end';
+  if (state === 'generating') label = 'Scheduled - building the thread…';
+  if (state === 'submitting') label = 'Scheduled - posting to Reddit…';
+  if (state === 'posted') label = kind === 'live' && ['waiting', 'building', 'editing'].indexOf(j.map3EditStatus) >= 0
+    ? 'Live posted ✓ - monitoring maps' : 'Posted ✓ - open the thread';
+  if (state === 'attention') label = 'Scheduled thread needs you';
+  if (state === 'failed') label = 'Schedule failed - schedule again';
+  button.textContent = label;
+  button.className = 'pmt-launch pmt-launch-schedule' + (state ? ' pmt-sched-' + state : '');
+  var tip = kind === 'live' ? 'Post 5 minutes before the scheduled start and edit the thread after every map'
+    : 'Post when the match ends';
   if (state === 'watching') {
-    tip = (j.lastCheckAt ? 'Last checked ' + clockTime(j.lastCheckAt) +
-           (j.lastSeen ? ' (' + j.lastSeen.phase + ')' : '') + '. ' : '') +
-          (j.nextCheckAt ? 'Next check around ' + clockTime(j.nextCheckAt) + '. ' : '') +
-          'Click to cancel.';
+    tip = (j.lastCheckAt ? 'Last checked ' + clockTime(j.lastCheckAt) + '. ' : '') +
+      (j.nextCheckAt ? 'Next check around ' + clockTime(j.nextCheckAt) + '. ' : '') + 'Click to cancel.';
   } else if (state === 'generating' || state === 'submitting') {
     tip = 'Click to cancel.';
   } else if (state === 'posted') {
-    tip = j.threadUrl || '';
+    tip = (j.threadUrl || '') + (kind === 'live' && j.map3EditStatus === 'waiting' ? ' (monitoring maps)' : '');
   } else if (state === 'attention' || state === 'failed') {
     tip = j.error || '';
   }
-  scheduleBtn.title = tip;
+  button.title = tip;
 }
-
-function onScheduleClick() {
-  var j = scheduledJob;
-  var state = j ? j.state : '';
+function onScheduleClick(kind) {
+  var j = scheduledJobs[kind];
+  var state = j && j.state;
   if (state === 'watching' || state === 'generating' || state === 'submitting') {
-    if (!confirm('Cancel the scheduled post-match thread for this match?')) return;
+    if (!confirm('Cancel the scheduled ' + (kind === 'live' ? 'live discussion' : 'post-match thread') + '?')) return;
     chrome.runtime.sendMessage({ type: 'scheduleCancel', jobId: j.id });
     return;
   }
@@ -1009,26 +1007,25 @@ function onScheduleClick() {
     if (d.teams[0].name && d.teams[1].name) {
       label = d.teams[0].name + ' vs ' + d.teams[1].name + (d.event.name ? ' / ' + d.event.name : '');
     }
-  } catch (e) { /* the worker relabels it on its first check anyway */ }
-  chrome.runtime.sendMessage({ type: 'scheduleAdd', url: location.href, label: label }, function (res) {
+  } catch (e) { /* scheduler refreshes the label on the next check */ }
+  chrome.runtime.sendMessage({ type: 'scheduleAdd', url: location.href, label: label, kind: kind }, function (res) {
     var err = chrome.runtime.lastError;
     if (err || !res || !res.ok) {
       alert('Could not schedule the thread: ' + ((res && res.error) || (err && err.message) || 'no reply'));
     }
   });
 }
-
-function loadScheduledJob() {
-  chrome.storage.local.get([JOBS_KEY], function (v) {
-    scheduledJob = latestJobHere(v && v[JOBS_KEY]);
-    paintScheduleButton();
+function updateScheduledJobs(jobs) {
+  ['live', 'post'].forEach(function (kind) {
+    scheduledJobs[kind] = latestJobHere(jobs, kind);
+    paintScheduleButton(kind);
   });
 }
-
+function loadScheduledJobs() {
+  chrome.storage.local.get([JOBS_KEY], function (v) { updateScheduledJobs(v && v[JOBS_KEY]); });
+}
 chrome.storage.onChanged.addListener(function (changes, area) {
-  if (area !== 'local' || !changes[JOBS_KEY]) return;
-  scheduledJob = latestJobHere(changes[JOBS_KEY].newValue);
-  paintScheduleButton();
+  if (area === 'local' && changes[JOBS_KEY]) updateScheduledJobs(changes[JOBS_KEY].newValue);
 });
 
 /* -------------------------------------------------------------- entrypoint */
@@ -1038,17 +1035,19 @@ if (document.querySelector('.teamsBox') && !document.querySelector('.pmt-launch-
   var liveBtn = el('button', 'pmt-launch pmt-launch-live', 'Live Match Discussion Thread');
   liveBtn.title = 'Generate the r/GlobalOffensive live match discussion thread';
   liveBtn.addEventListener('click', function () { generate({ kind: 'live' }); });
-  scheduleBtn = el('button', 'pmt-launch pmt-launch-schedule', 'Schedule Post-Match Thread');
-  scheduleBtn.addEventListener('click', onScheduleClick);
+  scheduleButtons.live = el('button', 'pmt-launch pmt-launch-schedule', 'Schedule Live Match Discussion');
+  scheduleButtons.live.addEventListener('click', function () { onScheduleClick('live'); });
+  scheduleButtons.post = el('button', 'pmt-launch pmt-launch-schedule', 'Schedule Post-Match Thread');
+  scheduleButtons.post.addEventListener('click', function () { onScheduleClick('post'); });
   var btn = el('button', 'pmt-launch', 'Post-Match Thread');
   btn.title = 'Generate the r/GlobalOffensive post-match thread';
   btn.addEventListener('click', function () { generate({ kind: 'post' }); });
   stack.appendChild(liveBtn);
-  stack.appendChild(scheduleBtn);
+  stack.appendChild(scheduleButtons.live);
+  stack.appendChild(scheduleButtons.post);
   stack.appendChild(btn);
   document.body.appendChild(stack);
-  paintScheduleButton();
-  loadScheduledJob();
+  loadScheduledJobs();
 }
 
 // The watch tab is hidden, and Chrome freezes hidden tabs - it froze one
@@ -1082,7 +1081,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     var awake = holdAwake('pmt-build-' + msg.jobId);
     var isUpdate = msg.type === 'scheduledRegenerate';
     generate({
-      kind: 'post',
+      kind: msg.kind === 'live' ? 'live' : 'post',
       noOpen: true,
       scheduled: msg.jobId,
       onDone: function (res) {

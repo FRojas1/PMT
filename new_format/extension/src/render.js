@@ -334,15 +334,16 @@ function liveHeaderBlock(d, ctx) {
     ctx.teamTag(1) + ' ' + ctx.lpName(1) + '  ',
     ''
   ];
-  var allTba = d.maps.length && d.maps.every(function (m) {
-    return m.status === 'tba' || /^tba$/i.test(m.name);
+  // HLTV sometimes includes extra TBA map placeholders alongside the
+  // revealed map list. Once any real maps are known, omit those placeholders.
+  var namedMaps = (d.maps || []).filter(function (m) {
+    return m && m.name && !/^(?:tba|tbd)$/i.test(m.name.trim());
   });
-  if (allTba) {
+  if (!namedMaps.length) {
     lines.push('**Maps:** TBA  ');
   } else {
-    d.maps.forEach(function (m) {
-      if (m.status === 'tba' || /^tba$/i.test(m.name)) lines.push('**TBA**  ');
-      else if (m.status === 'finished') {
+    namedMaps.forEach(function (m) {
+      if (m.status === 'finished') {
         lines.push('**' + m.name + ':** ' + m.score[0] + '-' + m.score[1] + '  ');
       } else if (m.status === 'live') {
         lines.push('**' + m.name + ':** LIVE  ');
