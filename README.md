@@ -18,7 +18,7 @@ The Firefox installer, **[`PMT-Firefox.xpi`](./PMT-Firefox.xpi)**, is located in
 
 You can also drag the signed `.xpi` into Firefox to start installation. The installed add-on remains available after restarting the browser. **Firefox 142 or newer** is required by the current Firefox manifest.
 
-To load the Firefox source temporarily for development, use `about:debugging` → **This Firefox** → **Load Temporary Add-on** and choose `new_format/extension-firefox/manifest.json`.
+To load the Firefox source temporarily for development, use `about:debugging` → **This Firefox** → **Load Temporary Add-on** and choose `new_format/extension/manifest.json`.
 
 ### Chrome / Edge — unpacked extension
 
@@ -34,10 +34,11 @@ Keep the folder on your computer while using the extension. The Chromium and Fir
 
 ## Creating a Thread
 
-Open a match on [HLTV](https://www.hltv.org/matches). Three buttons appear near the bottom-right corner:
+Open a match on [HLTV](https://www.hltv.org/matches). Four buttons appear near the bottom-right corner:
 
 - **Live Match Discussion Thread** — Generate a discussion thread for an upcoming or ongoing match.
 - **Post-Match Thread** — Generate a post-match thread for a completed match.
+- **Schedule Live Match Discussion** — Start creating a discussion five minutes before the scheduled start, then edit the same Reddit thread after each completed map.
 - **Schedule Post-Match Thread** — Monitor a match and prepare or automatically post a thread after it finishes.
 
 For manual thread creation:
@@ -54,6 +55,19 @@ Depending on what's available, threads can include scores and map statistics, pl
 PMT searches for the relevant Liquipedia event and team pages. If a link is wrong or missing, change its URL in the thread panel and click **Regenerate**. Corrected links are remembered for future use. Clear a URL field and regenerate to search again.
 
 If a Liquipedia page is unavailable, PMT will still attempt to build a thread using available HLTV data.
+
+## Scheduling Live Match Discussion Threads
+1. Open a match on HLTV and click **Schedule Live Match Discussion**.
+2. PMT starts creating the live-format thread **five minutes before the scheduled start** and automatically submits it (if **Auto-submit** is enabled). If scheduled later, it starts on the next check, including when HLTV already shows **LIVE**.
+3. Once posted, it checks the match approximately every minute. When a map finishes or its delayed statistics become available, it regenerates the live body and edits **that same Reddit post**.
+4. The existing edit safety check refuses to overwrite a manually edited Reddit body. Monitoring ends after final-map statistics are confirmed, 60 minutes after the match ends at the latest, or after an 18-hour overall safety limit.
+5. Use **Options → Scheduled threads → Stop live updates** to stop monitoring a posted discussion without deleting the Reddit post.
+
+The browser must remain running and logged into the posting Reddit account. A failed Reddit edit is never replaced with a duplicate submission. A preexisting manually submitted live discussion is not automatically adopted.
+
+Live updates reuse an open Reddit tab for the same thread and keep it open for later updates. If no matching tab is open, PMT opens one. Editing uses old Reddit's own **Edit/Save** form and verifies the saved Markdown, reloading the thread when needed to confirm the change. A reused tab showing the new Reddit design is navigated to old Reddit for editing.
+
+PMT checks the thread, subreddit, author account, and original Markdown before saving. The extension does not fetch `/api/info.json` or `/api/me.json` or send its own `/api/editusertext` request. Reddit's page handles Save; a rejected save, CAPTCHA, or unconfirmed result is reported as a failed update.
 
 ## Scheduling Post-Match Threads
 
@@ -78,7 +92,8 @@ This applies to **any missing finished-map statistics**, not only Map 3 or match
 
 To avoid overwriting your changes, PMT will not automatically replace a Reddit post whose body has been manually edited since PMT submitted it. The update feature applies to threads **automatically submitted by the scheduler**; manually submitted threads are not automatically edited.
 
-> **Release note:** The automatic edit feature requires the updated `scheduler.js`, `content.js`, and `reddit.js` to be included in the distributed extension. Rebuild and re-sign `PMT-Firefox.xpi` after updating those files; an older signed `.xpi` will not gain the feature just because the repository source changed.
+These post-match updates use the same old-Reddit **Edit → Save** flow and save verification as live discussion updates.
+
 
 ### Automatic submission
 

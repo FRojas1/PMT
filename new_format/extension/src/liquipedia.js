@@ -25,7 +25,8 @@ function normalizeTeamName(name) {
     navi: 'natusvincere',
     innercircle: 'ic',
     nip: 'ninjasinpyjamas',
-    '1w': '1win'
+    '1w': '1win',
+    lag: "life's a game",
   };
 
   return aliases[normalized] || normalized;
@@ -545,18 +546,100 @@ function scoresEqual(entries, want) {
     String(entries[1].score) === String(want[1]);
 }
 
-// Prefer the cell whose scores match HLTV (so a rematch in a later round is
-// not confused with the series just played). If Liquipedia has not caught up,
-// the unique pairing of these two teams is enough; if they appear twice, the
-// slot that still has no winner is the live one.
-function pickNamedMatch(found) {
-  var exact = found.filter(function (x) { return x.exact; });
-  if (exact.length) return exact[0];
-  if (found.length === 1) return found[0];
-  var open = found.filter(function (x) {
-    return !x.entries.some(function (e) { return e.won; });
+// Match popups contain the HLTV link and a countdown timestamp. These identify
+// a series more reliably than its score: the same teams can win 2-0 twice.
+function bracketMatchInfo(match) {
+  var ids = [];
+  Array.prototype.forEach.call(match.querySelectorAll('a[href]'), function (a) {
+    try {
+      var u = new URL(a.getAttribute('href'), 'https://liquipedia.net');
+      var m = /^(?:www\.)?hltv\.org$/i.test(u.hostname) && u.pathname.match(/^\/matches\/(\d+)(?:\/|$)/);
+      if (m && ids.indexOf(m[1]) < 0) ids.push(m[1]);
+    } catch (e) { /* not an external match link */ }
   });
-  return open.length === 1 ? open[0] : null;
+  var timer = match.querySelector('.match-info-countdown [data-timestamp], .timer-object[data-timestamp]');
+  var time = Number(timer && timer.getAttribute('data-timestamp')) || 0;
+  if (!isFinite(time) || time < 0) time = 0;
+  if (time > 0 && time < 1e12) time *= 1000; // Liquipedia seconds -> HLTV milliseconds
+  return { ids: ids, time: time };
+}
+
+function stageInfo(label) {
+  var text = String(label || '').toLowerCase();
+  var compact = text.replace(/[^a-z0-9]/g, '');
+  var group = text.match(/\bgroup\s+([a-z]|\d+)\b/);
+  var round = /(?:third|3rd)place/.test(compact) ? 'third place' :
+    /quarterfinal/.test(compact) ? 'quarter final' :
+    /semifinal/.test(compact) ? 'semi final' :
+    /final/.test(compact) ? 'final' : '';
+  var numbered = compact.match(/roundof(\d+)|round(\d+)/);
+  if (!round && numbered) round = numbered[1] ? 'round of ' + numbered[1] : 'round ' + numbered[2];
+  return {
+    round: round,
+    side: /\bupper\b|\bub\b/.test(text) ? 'upper' : /\blower\b|\blb\b/.test(text) ? 'lower' : '',
+    phase: /\bplay\s*-?\s*offs?\b/.test(text) ? 'playoffs' : /\bgroup\b|\bswiss\b/.test(text) ? 'groups' : '',
+    group: group ? group[1] : ''
+  };
+}
+
+// Keep the nearest heading at each level. For Group B, this includes Group
+// Stage, but never the previous Group A heading. MediaWiki also wraps headings.
+function bracketStage(bracket) {
+  var labels = [];
+  var level = 7;
+  for (var n = bracket; n && level > 2; n = n.parentElement) {
+    for (var p = n.previousElementSibling; p && level > 2; p = p.previousElementSibling) {
+      var h = p.matches('h1,h2,h3,h4,h5,h6') ? p :
+        p.classList.contains('mw-heading') ? p.querySelector('h1,h2,h3,h4,h5,h6') : null;
+      var nextLevel = h ? Number(h.tagName.slice(1)) : 0;
+      if (!nextLevel || nextLevel >= level) continue;
+      labels.push(lpText(h));
+      level = nextLevel;
+    }
+  }
+  return stageInfo(labels.join(' '));
+}
+
+function stageMatches(candidate, want) {
+  var actual = stageInfo(roundNameFor(candidate.match, candidate.bracket));
+  var phase = bracketStage(candidate.bracket);
+  if (want.phase && phase.phase && want.phase !== phase.phase) return false;
+  if (want.group && phase.group && want.group !== phase.group) return false;
+  if (want.round && actual.round && want.round !== actual.round) return false;
+  if (want.side && actual.side && want.side !== actual.side) return false;
+  // HLTV's unqualified playoff Semi-final is not a group Upper Semi-final.
+  if (want.round && actual.round && !want.side && actual.side && want.phase !== 'groups') return false;
+  return true;
+}
+
+// A repeated pairing must be disambiguated by the match link, date or stage.
+// A matching score (or the only slot without a winner) cannot identify it:
+// an earlier group result may match while the playoff result is still pending.
+function pickNamedMatch(found, context) {
+  context = context || {};
+  var matchId = String(context.matchId || '');
+  var identified = matchId ? found.filter(function (x) { return x.info.ids.indexOf(matchId) >= 0; }) : [];
+  if (identified.length) {
+    if (identified.length !== 1) return null;
+    identified[0].matchedBy = 'match ID';
+    return identified[0];
+  }
+  var wantStage = stageInfo(context.stage);
+  var time = Number(context.matchTime) || 0;
+  var pool = found.filter(function (x) {
+    if (matchId && x.info.ids.length && x.info.ids.indexOf(matchId) < 0) return false;
+    // Date-only entries use midnight; delayed starts may cross midnight.
+    if (time && x.info.time && Math.floor(time / 86400000) !== Math.floor(x.info.time / 86400000) &&
+        Math.abs(time - x.info.time) > 12 * 3600000) return false;
+    return stageMatches(x, wantStage);
+  });
+  if (time) {
+    var dated = pool.filter(function (x) { return x.info.time; });
+    if (dated.length) pool = dated;
+  }
+  if (pool.length !== 1) return null;
+  pool[0].matchedBy = time && pool[0].info.time ? 'match date' : context.stage ? 'stage and pairing' : 'unique pairing';
+  return pool[0];
 }
 
 function opponentNames(entries) {
@@ -613,7 +696,7 @@ function upcomingFor(bracket, teamNames, except) {
  * side may list two opponents when that slot is still being played for - that
  * used to be treated as "not decided" and the whole line was dropped.
  */
-function nextRound(doc, teamNames, scores) {
+function nextRound(doc, teamNames, scores, context) {
   var found = [];
   var brackets = doc.querySelectorAll('.brkts-bracket');
   for (var b = 0; b < brackets.length; b++) {
@@ -632,12 +715,13 @@ function nextRound(doc, teamNames, scores) {
         entries: entries,
         flipped: flipped,
         want: want,
+        info: bracketMatchInfo(matches[m]),
         exact: scoresEqual(entries, want)
       });
     }
   }
 
-  var pick = pickNamedMatch(found);
+  var pick = pickNamedMatch(found, context);
   if (!pick) return null;
 
   var entries = pick.entries;
@@ -674,6 +758,7 @@ function nextRound(doc, teamNames, scores) {
   if (!(result.advance || result.drop)) return null;
   result.lpScores = [entries[0].score, entries[1].score];
   result.scoreMatched = pick.exact;
+  result.matchedBy = pick.matchedBy;
   return result;
 }
 
