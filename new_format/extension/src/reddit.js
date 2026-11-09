@@ -52,8 +52,218 @@
     if (/\/submit\b/.test(document.referrer)) {
       chrome.runtime.sendMessage({ type: 'scheduledLanded', url: location.href.split('#')[0] },
         function () { void chrome.runtime.lastError; });
+    } else {
+      // Only the scheduler's exact editing tab can obtain a job. Normal comment
+      // pages get { none: true } and are never modified.
+      runMap3RedditEdit();
     }
     return;
+  }
+
+  // Edit through old Reddit's own form. The page supplies the original
+  // Markdown and handles Save, so this does not fetch Reddit's JSON endpoints
+  // or construct an API request in the extension's content-script context.
+  function runMap3RedditEdit() {
+    var hashMatch = /(?:^#|&)pmt-edit=([^&]+)/.exec(location.hash);
+    var id = '';
+    try { if (hashMatch) id = decodeURIComponent(hashMatch[1]); } catch (e) { /* worker also matches tab */ }
+    ask({ type: 'scheduledMap3EditJob', jobId: id }).then(function (job) {
+      if (!job.ok) return;  // a regular Reddit comments tab
+      // Chrome can freeze hidden tabs; hold a lock until this short operation finishes.
+      var released = false;
+      var releaseLock = function () {};
+      var unlock = function () { released = true; releaseLock(); };
+      if (navigator.locks && navigator.locks.request) {
+        navigator.locks.request('pmt-edit-' + job.jobId, function () {
+          if (released) return null;
+          return new Promise(function (resolve) { releaseLock = resolve; });
+        }).catch(function () {});
+      }
+      var report = function (ok, error, permanent) {
+        return ask({ type: 'scheduledMap3EditResult', jobId: job.jobId,
+                     ok: ok, error: error || '', permanent: !!permanent });
+      };
+      var normText = function (s) {return String(s || '').replace(/\r\n/g, '\n').replace(/[ \t\\\n]+$/, '');};
+      var verifyKey = 'pmt:edit-verify:' + job.jobId;
+
+      function readVerification() {
+        try {
+          var saved = JSON.parse(sessionStorage.getItem(verifyKey) || 'null');
+          return saved && saved.thingId === job.thingId && saved.body === job.newBody &&
+            Date.now() - saved.at < 180000;
+        } catch (e) { return false; }
+      }
+      function clearVerification() {
+        try { sessionStorage.removeItem(verifyKey); } catch (e) { /* optional storage */ }
+      }
+      function postOnPage() {
+        return document.querySelector('.thing.link[data-fullname="' + job.thingId + '"]');
+      }
+      function ownControl(post, selector) {
+        var nodes = post.querySelectorAll(selector);
+        for (var i = 0; i < nodes.length; i++) {
+          if (nodes[i].closest('.thing') === post) return nodes[i];
+        }
+        return null;
+      }
+      function editorOnPost(post) {
+        if (!post) return null;
+        var forms = post.querySelectorAll('form.usertext');
+        for (var i = 0; i < forms.length; i++) {
+          var form = forms[i];
+          var thing = form.querySelector('input[name="thing_id"]');
+          var field = form.querySelector('.usertext-edit textarea[name="text"]');
+          var body = form.querySelector('.usertext-body');
+          var save = form.querySelector('.usertext-buttons button.save');
+          if (form.closest('.thing') === post && thing && thing.value === job.thingId &&
+              field && body && save) {
+            return { form: form, text: field, body: body, save: save,
+              panel: field.closest('.usertext-edit') };
+          }
+        }
+        return null;
+      }
+      function pageProblem() {
+        if (postOnPage()) return '';
+        var head = (document.title || '') + ' ' +
+          (document.body ? document.body.textContent.slice(0, 2000) : '');
+        if (/blocked by network security/i.test(head)) return 'Reddit blocked the thread page with network security';
+        if (/verify you are human|checking your browser|just a moment/i.test(head)) {
+          return 'Reddit requires a browser verification on the thread page';
+        }
+        if (document.querySelector('shreddit-app, faceplate-app, #AppRouter-main-content')) {
+          return 'Reddit opened its new design; the old-Reddit edit form is required';
+        }
+        return '';
+      }
+      function loggedInName() {
+        var a = document.querySelector('#header-bottom-right .user a[href*="/user/"], ' +
+          '#header-bottom-right .user a[href*="/u/"]');
+        try {
+          var m = a && new URL(a.getAttribute('href'), location.href).pathname.match(/^\/(?:user|u)\/([^/]+)/i);
+          return m ? decodeURIComponent(m[1]) : '';
+        } catch (e) { return ''; }
+      }
+      function formErrors(f) {
+        var errors = visibleErrors(f);
+        var status = f.form.querySelector('.status');
+        var text = status && visible(status) ? status.textContent.replace(/\s+/g, ' ').trim() : '';
+        if (/error|failed|forbidden|blocked|try again|rate.?limit/i.test(text)) errors.push(text);
+        return errors;
+      }
+
+      // A newly rendered form contains server-supplied Markdown. The value of
+      // the textarea we filled is never itself evidence that Save succeeded.
+      // If Reddit closes that same form instead of replacing it, reload once
+      // and let the next content-script run verify the freshly loaded text.
+      function waitForSaved(f, before) {
+        var started = Date.now();
+        var closedSince = 0;
+        return new Promise(function (resolve, reject) {
+          (function poll() {
+            try {
+              var problem = pageProblem();
+              if (problem) return reject(new Error(problem));
+              var errors = formErrors(f).filter(function (s) { return before.indexOf(s) < 0; });
+              if (errors.length) return reject(new Error('Reddit edit form: ' + errors.join(' / ')));
+              if (captchaShown()) return reject(new Error('Reddit asked for a CAPTCHA while editing'));
+              var fresh = editorOnPost(postOnPage());
+              if (fresh && fresh.text !== f.text && !visible(fresh.panel) && visible(fresh.body) &&
+                  normText(fresh.text.textContent) === normText(job.newBody) &&
+                  normText(fresh.text.value) === normText(job.newBody)) {
+                return resolve({ ok: true });
+              }
+              if (fresh && !visible(fresh.panel) && visible(fresh.body)) {
+                if (!closedSince) closedSince = Date.now();
+                if (Date.now() - closedSince >= 600) {
+                  sessionStorage.setItem(verifyKey, JSON.stringify({
+                    thingId: job.thingId, body: job.newBody, at: Date.now()
+                  }));
+                  location.reload();
+                  return resolve({ reloading: true });
+                }
+              } else closedSince = 0;
+              if (Date.now() - started > 45000) {
+                return reject(new Error('Reddit did not confirm the edit within 45 seconds'));
+              }
+              setTimeout(poll, 300);
+            } catch (e) { reject(e); }
+          })();
+        });
+      }
+      function doEdit() {
+        var url = location.pathname.match(/^\/r\/([^/]+)\/comments\/([a-z0-9]+)(?:\/|$)/i);
+        if (!/^t3_[a-z0-9]+$/i.test(job.thingId) || !url ||
+            ('t3_' + url[2]).toLowerCase() !== job.thingId.toLowerCase() ||
+            decodeURIComponent(url[1]).toLowerCase() !== String(job.subreddit).toLowerCase() ||
+            typeof job.newBody !== 'string' || !job.newBody || typeof job.originalBody !== 'string') {
+          return Promise.resolve({ ok: false, permanent: true, error: 'Reddit edit job does not match this thread' });
+        }
+        return waitFor(function () { return postOnPage() || pageProblem(); }, 20000).then(function (post) {
+          if (typeof post === 'string') throw new Error(post);
+          if (!post) throw new Error('Reddit did not provide the expected thread on this page');
+          if (!post.classList.contains('self') ||
+              String(post.getAttribute('data-subreddit') || '').toLowerCase() !== String(job.subreddit).toLowerCase()) {
+            return { ok: false, permanent: true, error: 'Reddit page does not contain the expected text post' };
+          }
+          var authorLink = ownControl(post, '.tagline a.author');
+          var author = post.getAttribute('data-author') || (authorLink && authorLink.textContent.trim()) || '';
+          if (!document.body.classList.contains('loggedin') || !author ||
+              loggedInName().toLowerCase() !== author.toLowerCase()) {
+            return { ok: false, permanent: true, error: 'Not logged into the thread author account' };
+          }
+          if (!editorOnPost(post)) {
+            var expand = ownControl(post, '.expando-button.selftext.collapsed');
+            if (expand) expand.click();
+          }
+          return waitFor(function () { return editorOnPost(postOnPage()); }, 10000)
+            .then(function (f) {
+              if (!f) throw new Error('Reddit did not provide the post edit form');
+              return editForm(post, f);
+            });
+        });
+      }
+      function editForm(post, f) {
+        var current = normText(f.text.value);
+        if (current === normText(job.newBody) && normText(f.text.textContent) === normText(job.newBody)) {
+          return { ok: true }; // already saved in the page's server-supplied Markdown
+        }
+        if (current !== normText(job.originalBody)) {
+          return { ok: false, permanent: true, error: 'Reddit body was manually changed; refusing to overwrite' };
+        }
+        if (readVerification()) {
+          return { ok: false, error: 'Reddit edit was not confirmed after reloading the thread' };
+        }
+        if (!visible(f.text)) {
+          var edit = ownControl(post, 'a.edit-usertext');
+          if (!edit) throw new Error('Reddit did not provide an Edit control for this post');
+          edit.click();
+        }
+        return waitFor(function () {
+          var ready = editorOnPost(postOnPage());
+          return ready && visible(ready.text) && visible(ready.save) && !ready.save.disabled ? ready : null;
+        }, 10000).then(function (ready) {
+          if (!ready) throw new Error('Reddit edit form did not become ready');
+          // Re-check after opening: Reddit's script or a person may have changed
+          // the field while we waited for the native editor.
+          if (normText(ready.text.value) !== normText(job.originalBody)) {
+            return { ok: false, permanent: true, error: 'Reddit body was manually changed; refusing to overwrite' };
+          }
+          if (captchaShown()) throw new Error('Reddit requires a CAPTCHA before editing');
+          var before = formErrors(ready);
+          fill(ready.text, job.newBody);
+          ready.save.click();
+          return waitForSaved(ready, before);
+        });
+      }
+      Promise.resolve().then(doEdit).catch(function (e) {
+        return { ok: false, error: String((e && e.message) || e), permanent: false };
+      }).then(function (r) {
+        if (r.reloading) return; // the next page load performs the read-back
+        clearVerification();
+        return report(!!r.ok, r.error, r.permanent);
+      }).then(function () { unlock(); }, function () { unlock(); });
+    });
   }
 
   var hash = {};
@@ -454,6 +664,11 @@
           if (textTab) textTab.click();
         }
         // every stop() below ends its branch - nothing after one may run on
+        // Empty flair setting: no picker to run or flair to verify.
+        if (!wanted.trim()) {
+          trace('no flair configured; skipping flair picker');
+          return fillAndSubmit(f, job);
+        }
         trace('picking the flair', { wanted: wanted });
         return pickFlair().then(function (picked) {
           if (!picked) return stop('flair', 'the "' + wanted + '" flair could not be selected', flairScene());
@@ -471,7 +686,27 @@
     });
   }
 
+
+  function disableInboxReplies(form) {
+    const checkbox = form.querySelector(
+      'input[type="checkbox"][name="sendreplies"]'
+    );
+
+    if (!checkbox) return false;
+
+    if (checkbox.checked) checkbox.click();
+
+    return !checkbox.checked;
+  }
+
+
   function fillAndSubmit(f, job) {
+    if (!disableInboxReplies(f.form)) {
+    return stop(
+      'reply-setting',
+      'Could not disable inbox replies'
+    );
+  }
     fill(f.title, job.title);
     fill(f.text, job.body);
     if (f.title.value !== job.title || f.text.value !== job.body) {
@@ -510,7 +745,17 @@
         console.info('[PMT] not the old reddit submit form - flair left alone');
         return;
       }
+      
+      waitFor(function () {
+        return document.querySelector(
+          '#newlink input[type="checkbox"][name="sendreplies"]'
+        );
+      }, 10000).then(function (checkbox) {
+        if (checkbox && checkbox.checked) checkbox.click();
+      });
+
       pickFlair();
+
     });
   }
 

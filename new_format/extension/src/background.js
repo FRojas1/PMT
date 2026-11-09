@@ -684,7 +684,7 @@ function navigatedResult(r, url, t0, ok) {
 // handing the interstitial back as the article.
 function navigateInTab(tabId, url, t0) {
   return navigate(tabId, url)
-    .then(function () { return readNavigatedPage(tabId, url, t0, 6); });
+    .then(function () { return readNavigatedPage(tabId, url, t0, 15); });
 }
 
 function readNavigatedPage(tabId, url, t0, left) {
@@ -751,4 +751,7 @@ chrome.action.onClicked.addListener(function (tab) {
 
 // "Schedule Post-Match Thread": watch a match until it ends, then post it.
 // Shares this file's tab helpers, so it is loaded last.
-importScripts('scheduler.js');
+if (typeof importScripts === 'function') {
+  importScripts('scheduler.js');
+}
+

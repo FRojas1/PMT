@@ -233,7 +233,10 @@ function renderJobs() {
 
       var meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = 'scheduled ' + when(job.createdAt) + ' - ' + jobSummary(job);
+      meta.textContent = (job.kind === 'live' ? 'LIVE discussion' : 'Post-match') +
+        ' · scheduled ' + when(job.createdAt) + ' - ' + jobSummary(job) +
+        (job.kind === 'live' && job.state === 'posted' ?
+          ' · map updates: ' + (job.map3EditStatus || 'off') : '');
       box.appendChild(meta);
 
       if (job.threadUrl) {
@@ -256,6 +259,14 @@ function renderJobs() {
 
       var active = job.state === 'watching' || job.state === 'generating' || job.state === 'submitting';
       if (active) box.appendChild(jobButton('Cancel', function () { sendJob('scheduleCancel', job.id); }));
+      if (job.kind === 'live' && job.state === 'posted' &&
+          ['waiting', 'building', 'editing'].indexOf(job.map3EditStatus) >= 0) {
+        box.appendChild(jobButton('Stop live updates', function () {
+          if (confirm('Stop editing this live discussion after completed maps?')) {
+            sendJob('scheduleStopUpdates', job.id);
+          }
+        }));
+      }
       if (job.state === 'attention' || job.state === 'submitting') {
         box.appendChild(jobButton('Go to the submit tab', function () { sendJob('scheduleFocus', job.id); }));
       }
