@@ -4,7 +4,7 @@ A browser extension for **Google Chrome, Microsoft Edge, and Firefox (desktop)**
 
 The extension collects match information from [HLTV](https://www.hltv.org/) and [Liquipedia](https://liquipedia.net/counterstrike/Main_Page), formats it into a Reddit thread, and lets you review and edit the result before posting. It can also monitor a match and automatically submit its post-match thread when the match ends.
 
-**Source update 2.7.3:** scheduled page loads and thread generation now use a shared queue to reduce simultaneous loading and memory spikes. The checked-in signed `PMT-Firefox.xpi` is still version 2.7.2 and does not contain this update. Firefox users need a newly signed 2.7.3 installer, or can test the source temporarily using the development instructions below.
+**Update 2.7.3:** scheduled page loads and thread generation now use a shared queue to reduce simultaneous loading and memory spikes.
 
 This guide uses the following terms:
 
@@ -179,8 +179,6 @@ Include the relevant logs and a brief description when reporting an issue. Remov
 1. Download the latest **Mozilla-signed** `PMT-Firefox.xpi`.
 2. Open `about:addons` → gear icon → **Install Add-on From File…** and select it.
 3. Confirm the update if prompted.
-
-Check the version notice at the top of this document before installing the signed Firefox package. The 2.7.3 source update requires a new signature; the earlier checked-in 2.7.2 installer remains unchanged.
 
 To replace the currently installed add-on, the new `.xpi` must use the same Firefox add-on ID and a newer version number in its manifest. Manually distributed unlisted add-ons do not automatically update unless a separate update mechanism has been configured.
 
