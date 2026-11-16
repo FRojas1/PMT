@@ -72,6 +72,11 @@ var TEAM_LOGO_FLAIRS = {
   "red canids": "redcanids",
   "chinggis warriors": "chinggis",   // Chinggis Warriors  [first-word]
   "rare atom": "rareatom",
+  "vision": "paravision",
+  "dendele": "dendele",
+  "the one": "theone",
+  "gosh": "gosh",
+  "bb": "bb"
 };
 
 // The flair slug for a team, or null when the subreddit has no logo for it.

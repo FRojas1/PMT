@@ -29,6 +29,14 @@ var checking = {};
 var alarmOn = null;
 var jobsLock = Promise.resolve();
 var requestSequence = 0;
+// One match may load pages at a time. The persisted build/submit/edit states
+// keep its place after an asynchronous acknowledgement or a worker restart.
+var SCHEDULE_SPACING_MS = 3000;
+var schedulerTick = null;
+var schedulerTickAgain = false;
+var schedulerTimer = null;
+var schedulerNextWorkAt = 0;
+var schedulerHadInFlight = false;
 
 function errorText(e) { return String((e && e.message) || e); }
 function copy(value) { return value == null ? value : JSON.parse(JSON.stringify(value)); }
@@ -474,7 +482,7 @@ function openScheduledTab(url, opts) {
 function closeWatchTab(job) {
   return getTab(job && job.watchTabId).then(function (t) {
     if (t && matchIdOf(t.url) === job.matchId) {
-      tabEdit(function (cb) { chrome.tabs.remove(t.id, cb); }, function () {});
+      return tabEditP(function (cb) { chrome.tabs.remove(t.id, cb); });
     }
   });
 }
@@ -856,10 +864,13 @@ function startBuild(id, kind, purpose, pageReady) {
   });
 }
 function buildFailed(id, token, error) {
+  var abandoned = null;
   return updateJob(id, function (job) {
     var build = job.build;
     if (!build || build.requestId !== token) return;
     var t = job.threads[build.kind];
+    abandoned = { watchTabId: job.watchTabId, matchId: job.matchId };
+    job.watchTabId = null;
     job.build = null; job.replaceWatchTab = true; job.nextCheckAt = Date.now() + UPDATE_CHECK_MS;
     if (build.purpose === 'initial') {
       if (t.buildAttempts >= MAX_BUILD_ATTEMPTS) failThread(job, t, error);
@@ -872,7 +883,7 @@ function buildFailed(id, token, error) {
         threadNote(job, t, 'update generation failed; retrying', { error: error });
       }
     }
-  }).then(function (job) { if (job) return regroupTab(job.watchTabId); });
+  }).then(function () { if (abandoned) return closeWatchTab(abandoned); });
 }
 function threadBuilt(msg, sender) {
   var result = null;
@@ -894,9 +905,9 @@ function threadBuilt(msg, sender) {
     if (build.purpose === 'initial') {
       t.title = msg.title; t.body = msg.body; t.notes = msg.notes || [];
       t.gamblingLeft = msg.gamblingLeft || []; t.initialSignature = build.signature;
-      t.state = 'submitting'; t.submitOpenedAt = Date.now(); t.submitPageSeenAt = null;
-      t.submitOpenFailures = 0; t.reopenSubmitAt = null;
-      threadNote(job, t, 'thread built; opening Reddit', { title: t.title }); result.submit = true;
+      t.state = 'submitting'; t.submitOpenedAt = null; t.submitPageSeenAt = null;
+      t.submitOpenFailures = 0; t.reopenSubmitAt = Date.now();
+      threadNote(job, t, 'thread built; queued for Reddit', { title: t.title });
     } else if (msg.body === t.body) {
       t.publishedSignature = build.signature;
       t.update.status = build.purpose === 'maps' ? 'waiting' : 'done';
@@ -906,13 +917,11 @@ function threadBuilt(msg, sender) {
     } else {
       t.update.status = 'editing'; t.update.body = msg.body; t.update.attempts = 0;
       t.update.signature = build.signature; t.update.nextAt = Date.now();
-      threadNote(job, t, 'content ready; preparing Reddit edit'); result.edit = true;
+      threadNote(job, t, 'content ready; queued for Reddit edit');
     }
   }).then(function () {
     if (!result) return;
     if (result.error) return buildFailed(result.jobId, result.token, result.error);
-    if (result.submit) return openSubmitTab(result.threadId);
-    if (result.edit) return startEdit(result.threadId);
   }).then(function () { return tick(); });
 }
 
@@ -1167,22 +1176,54 @@ function monitorSubmission(job, t) {
   }
   return thawIfFrozen(job, t.submitTabId);
 }
-function tickJob(id, settings) {
+// A generation message only acknowledges its start. It must retain the global
+// slot until threadBuilt arrives. Reddit loads likewise retain it until their
+// acknowledgement, error or timeout; a future retry does not occupy the slot.
+function workInFlight(job) {
+  return !job.cancelled && (!!job.build || threads(job).some(function (t) {
+    return (t.state === 'submitting' && !t.reopenSubmitAt) ||
+      (editing(t) && !t.update.nextAt);
+  }));
+}
+function finalBuildAt(job) {
+  var live = job.threads.live;
+  if (!finalNeeded(job) || editing(live)) return Infinity;
+  return live.update && live.update.purpose === 'final' && live.update.status === 'waiting' ?
+    live.update.nextAt || 0 : 0;
+}
+function nextWorkAt(job) {
+  if (!hasWork(job)) return Infinity;
+  var at = needsSource(job) ? job.nextCheckAt || 0 : Infinity;
+  at = Math.min(at, finalBuildAt(job));
+  threads(job).forEach(function (t) {
+    if (t.state === 'submitting' && t.reopenSubmitAt) at = Math.min(at, t.reopenSubmitAt);
+    if (editing(t) && t.update.nextAt) at = Math.min(at, t.update.nextAt);
+  });
+  return at;
+}
+function workPriority(job) {
+  var post = job.threads.post;
+  if (post && (post.state === 'submitting' || (post.state === 'watching' && job.overSince))) return 0;
+  if (finalNeeded(job) || (post && editing(post))) return 1;
+  return 2;
+}
+function tickJob(id, settings, monitorOnly) {
   if (checking[id]) return Promise.resolve();
   checking[id] = true;
-  return updateJob(id, expireWork).then(function (job) {
+  return getJob(id).then(function (job) {
     if (!job || job.cancelled) return;
-    return Promise.all(threads(job).map(function (t) {
-      var submission = monitorSubmission(job, t);
-      if (!editing(t)) return submission;
-      return submission.then(function () {
-        if (t.update.nextAt && Date.now() >= t.update.nextAt) return startEdit(t.id);
-        if (!t.update.nextAt && Date.now() - t.update.startedAt > EDIT_TIMEOUT_MS) {
+    // Only maintain operations that have actually started here. Starting a
+    // queued retry or a fresh page load is reserved for the selected match.
+    return threads(job).reduce(function (pending, t) {
+      return pending.then(function () {
+        if (t.state === 'submitting' && !t.reopenSubmitAt) return monitorSubmission(job, t);
+        if (!editing(t) || t.update.nextAt) return;
+        if (Date.now() - t.update.startedAt > EDIT_TIMEOUT_MS) {
           return editFailed(t.id, t.update.editToken, 'Reddit did not confirm the edit', false);
         }
         return thawIfFrozen(job, t.update.tabId);
       });
-    }));
+    }, Promise.resolve());
   }).then(function () { return getJob(id); }).then(function (job) {
     if (!job || job.cancelled) return;
     if (job.build) {
@@ -1191,31 +1232,95 @@ function tickJob(id, settings) {
       }
       return thawIfFrozen(job, job.watchTabId);
     }
-    var live = job.threads.live;
-    if (finalNeeded(job) && !editing(live) &&
-        !(live.update && live.update.purpose === 'final' && live.update.status === 'waiting' &&
-          live.update.nextAt > Date.now())) {
+    if (monitorOnly || workInFlight(job)) return;
+    var now = Date.now(), post = job.threads.post, live = job.threads.live;
+    function submitDue(t) { return t && t.state === 'submitting' && t.reopenSubmitAt && t.reopenSubmitAt <= now; }
+    function editDue(t) { return t && editing(t) && t.update.nextAt && t.update.nextAt <= now; }
+    if (submitDue(post)) return monitorSubmission(job, post);
+    if (editDue(post)) return startEdit(post.id);
+    if (finalBuildAt(job) <= now) {
       return startBuild(id, 'live', 'final', false);
     }
-    if (needsSource(job) && Date.now() >= (job.nextCheckAt || 0)) return checkMatch(job, settings);
+    var sourceDue = needsSource(job) && now >= (job.nextCheckAt || 0);
+    if (sourceDue && post && post.state === 'watching' && job.overSince) return checkMatch(job, settings);
+    if (submitDue(live)) return monitorSubmission(job, live);
+    if (editDue(live)) return startEdit(live.id);
+    if (sourceDue) return checkMatch(job, settings);
   }).then(function () { return releaseWatchTab(id); }).catch(function (e) {
     console.error('[PMT schedule] match workflow failed', id, e);
   }).then(function () { delete checking[id]; });
 }
+function runSchedulerTick() {
+  return scheduleSettings().then(function (settings) {
+    var abandoned = [];
+    // Expire queued jobs too, without loading their pages or marking a queued
+    // request as started. The timeout clock for each build begins on dispatch.
+    return withJobs(function (jobs) {
+      jobList(jobs).forEach(function (job) {
+        var hadBuild = !!job.build;
+        expireWork(job);
+        if (hadBuild && !job.build) {
+          abandoned.push({ watchTabId: job.watchTabId, matchId: job.matchId });
+          job.watchTabId = null;
+        }
+        if (!hasWork(job) && job.state !== 'attention' && Date.now() - job.updatedAt > KEEP_FINISHED_MS) delete jobs[job.id];
+      });
+      return jobs;
+    }).then(function (jobs) {
+      return Promise.all(abandoned.map(closeWatchTab)).then(function () { return jobs; });
+    }).then(function (jobs) {
+      var list = jobList(jobs), busy = list.filter(workInFlight);
+      if (busy.length) {
+        schedulerHadInFlight = true;
+        // Several operations can already be running when upgrading from an
+        // older build. Drain/recover those before starting any new work.
+        return busy.reduce(function (pending, job) {
+          return pending.then(function () { return tickJob(job.id, settings, true); });
+        }, Promise.resolve());
+      }
+      if (schedulerHadInFlight) {
+        schedulerNextWorkAt = Date.now() + SCHEDULE_SPACING_MS;
+        schedulerHadInFlight = false;
+      }
+      if (Date.now() < schedulerNextWorkAt) return;
+      var due = list.filter(function (job) { return nextWorkAt(job) <= Date.now(); });
+      due.sort(function (a, b) {
+        return workPriority(a) - workPriority(b) || nextWorkAt(a) - nextWorkAt(b) || a.createdAt - b.createdAt;
+      });
+      if (!due.length) return;
+      return tickJob(due[0].id, settings, false).then(function () {
+        schedulerNextWorkAt = Date.now() + SCHEDULE_SPACING_MS;
+      });
+    });
+  });
+}
+function planSchedulerTick(jobs, again) {
+  var list = jobList(jobs).filter(hasWork);
+  if (!list.length) return;
+  var busy = list.some(workInFlight);
+  if (busy) schedulerHadInFlight = true;
+  var due = Math.min.apply(null, list.map(nextWorkAt));
+  var delay = busy ? 30000 : Math.max(0, Math.max(due, schedulerNextWorkAt) - Date.now());
+  // Alarms remain the restart/suspension backstop. A short timer lets the
+  // queue drain between alarm ticks instead of checking every match together.
+  schedulerTimer = setTimeout(function () {
+    schedulerTimer = null; tick();
+  }, again ? 0 : Math.min(30000, delay));
+}
 function tick() {
-  return Promise.all([readJobs(), scheduleSettings()]).then(function (r) {
-    var jobs = r[0], settings = r[1];
-    var old = jobList(jobs).filter(function (job) {
-      return !hasWork(job) && job.state !== 'attention' && Date.now() - job.updatedAt > KEEP_FINISHED_MS;
-    }).map(function (job) { return job.id; });
-    var prune = !old.length ? Promise.resolve() : withJobs(function (all) {
-      old.forEach(function (id) { if (all[id] && !hasWork(all[id]) && all[id].state !== 'attention') delete all[id]; });
-    });
-    return prune.then(function () {
-      return Promise.all(jobList(jobs).filter(function (job) { return old.indexOf(job.id) < 0; })
-        .map(function (job) { return tickJob(job.id, settings); }));
-    });
-  }).catch(function (e) { console.error('[PMT schedule] tick failed', e); });
+  if (schedulerTick) { schedulerTickAgain = true; return schedulerTick; }
+  if (schedulerTimer != null) { clearTimeout(schedulerTimer); schedulerTimer = null; }
+  schedulerTick = runSchedulerTick().catch(function (e) {
+    console.error('[PMT schedule] tick failed', e);
+  }).then(readJobs).then(function (jobs) {
+    var again = schedulerTickAgain;
+    schedulerTickAgain = false; schedulerTick = null;
+    planSchedulerTick(jobs, again);
+  }, function (e) {
+    schedulerTickAgain = false; schedulerTick = null;
+    console.error('[PMT schedule] queue recovery failed', e);
+  });
+  return schedulerTick;
 }
 
 /* --------------------------------------------------------- user controls */
@@ -1267,18 +1372,24 @@ function cancelJob(id) {
     jobNote(job, 'cancelled the entire match workflow');
   }).then(function (job) {
     if (!job) return { ok: false };
-    return releaseWatchTab(id).then(function () { return { ok: true }; });
+    return releaseWatchTab(id).then(function () { tick(); return { ok: true }; });
   });
 }
 function stopLiveUpdates(id) {
+  var abandoned = null;
   return updateJob(id, function (job) {
     var live = job.threads.live;
     if (!live || live.state !== 'posted') return;
     job.liveUpdatesStopped = true;
     if (live.update) { live.update.status = 'stopped'; live.update.nextAt = null; }
-    if (job.build && job.build.kind === 'live') { job.build = null; job.replaceWatchTab = true; }
+    if (job.build && job.build.kind === 'live') {
+      abandoned = { watchTabId: job.watchTabId, matchId: job.matchId };
+      job.watchTabId = null; job.build = null; job.replaceWatchTab = true;
+    }
     jobNote(job, 'stopped LMT editing; the scheduled PMT remains active');
-  }).then(function () { return releaseWatchTab(id); }).then(function () { return { ok: true }; });
+  }).then(function () { if (abandoned) return closeWatchTab(abandoned); })
+    .then(function () { return releaseWatchTab(id); })
+    .then(function () { tick(); return { ok: true }; });
 }
 function retryJob(id, kind, allowResubmit) {
   return withJobs(function (jobs) {
@@ -1399,6 +1510,8 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
     });
   }).then(function (builds) {
     return Promise.all(builds.map(function (b) { return buildFailed(b.id, b.token, 'watch tab closed during generation'); }));
+  }).then(function () {
+    return tick();
   }).catch(function (e) { console.error('[PMT schedule] tab cleanup failed', e); });
 });
 if (chrome.notifications) chrome.notifications.onClicked.addListener(function (id) {
