@@ -4,6 +4,8 @@ A browser extension for **Google Chrome, Microsoft Edge, and Firefox (desktop)**
 
 The extension collects match information from [HLTV](https://www.hltv.org/) and [Liquipedia](https://liquipedia.net/counterstrike/Main_Page), formats it into a Reddit thread, and lets you review and edit the result before posting. It can also monitor a match and automatically submit its post-match thread when the match ends.
 
+**Update 2.7.3:** scheduled page loads and thread generation now use a shared queue to reduce simultaneous loading and memory spikes.
+
 This guide uses the following terms:
 
 | Term | Meaning |
@@ -129,6 +131,14 @@ Automatic posting requires an active Reddit login and a running browser. If Redd
 
 Open **Options → Scheduled threads** to view one entry per match, open its LMT and PMT, stop LMT updates, cancel remaining work, retry an individual thread or edit, copy generated content, or inspect the shared match log. The destination subreddit is fixed when scheduled.
 
+### Scheduling many matches
+
+Scheduled checks, generation, Reddit submissions and Reddit edits share one queue across matches. Only one match starts page work at a time, with a three-second gap between operations. A generation acknowledgement does not free the queue: it waits for the generated content, and Reddit operations wait for confirmation or their existing timeout. Known completed matches awaiting a PMT, and PMT/LMT handoffs, take priority over routine checks. Repeated alarm ticks do not add duplicate queued work.
+
+The check interval is a target. With many matches, a slow generation or Reddit confirmation can delay other checks and posting. Existing timeouts and retries let the queue continue; a timed-out generation tab is closed before another match starts. After a background-worker restart, saved build/submission/edit states prevent a second match from starting while earlier work is still active.
+
+This limits scheduled loading spikes. It does not unload existing idle tabs or limit manual generation started with the thread buttons.
+
 ## Settings and Troubleshooting
 
 ### Missing or incorrect information
@@ -170,8 +180,6 @@ Include the relevant logs and a brief description when reporting an issue. Remov
 2. Open `about:addons` → gear icon → **Install Add-on From File…** and select it.
 3. Confirm the update if prompted.
 
-The signed Firefox installer and extension source are published together with matching version numbers.
-
 To replace the currently installed add-on, the new `.xpi` must use the same Firefox add-on ID and a newer version number in its manifest. Manually distributed unlisted add-ons do not automatically update unless a separate update mechanism has been configured.
 
 ## Repository Layout
@@ -187,7 +195,7 @@ PMT/
 
 ## Development checks
 
-Run `node --test tests/*.test.js` from the repository root (Node.js 18 or newer). The tests simulate browser storage, tabs, alarms and Reddit acknowledgements without making network requests or posting real threads. They cover the combined handoff, delayed statistics, retries, restart recovery, migration, duplicate protection and final LMT formatting.
+Run `node --test tests/*.test.js` from the repository root (Node.js 18 or newer). The tests simulate browser storage, tabs, time and Reddit acknowledgements without making network requests or posting real threads. They cover queue spacing, overlapping ticks, asynchronous generation and Reddit completion, the combined handoff, delayed statistics, cancellation, timeouts, restart recovery and duplicate-submit protection. These are scheduler behavior checks, not a live Firefox memory benchmark.
 
 ## Notes
 

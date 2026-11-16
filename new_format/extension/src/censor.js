@@ -36,13 +36,13 @@
 var GAMBLING_NAME_RULES = [
   [/\bBetclic\s+Apogee\b/gi, 'Apogee'],        // Liquipedia "Betclic Apogee Esports" -> Apogee Esports
   [/\bBetclic\b/gi, 'Apogee'],                 // HLTV "Betclic"
-  [/\bBC\s?\.?\s?Game\b/gi, 'BCG'],            // "BC.Game Esports" -> BCG Esports; slug "bcgame"
+  [/\bBC\s?\.?\s?Game\b/gi, 'GOSH'],            // "BC.Game Esports" -> GOSH (as used at major); slug "bcgame"
   [/\bBET[-\s]?M\s+33\b/gi, '33'],             // Liquipedia's old "BET-M 33"
   [/\bBET[-\s]?M\b/gi, '33'],                  // HLTV "BET-M"
   [/\bPARIVISION\b/gi, 'VISION'],             // as at the Esports World Cup
   [/\bBetBoom\b/gi, 'BB'],                     // "BetBoom Team" -> BB Team (EWC); HLTV "BETBOOM" -> BB
-  [/\b1win\b/gi, '1W'],                        // Liquipedia: "1w Team"
-  [/\bSportsBetExpert\b/gi, 'SBE'],
+  [/\b1win\b/gi, 'The One'],                   // "1win" -> "The One" (as used at major)
+  //   [/\bSportsBetExpert\b/gi, 'SBE'],
   // event sponsors
   [/\bStake\s+Ranked\b/gi, 'StarLadder Ranked'],   // StarLadder's series, billed "StarLadder Stake Ranked"
   [/\bStake\s+Pulse\b/gi, 'BME Pulse'],            // Black Molly Entertainment's Stake Pulse Beat series
