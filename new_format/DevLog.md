@@ -500,8 +500,8 @@ It works like every other lookup here, in a real tab rather than a fetch
    `Match over` *or* the teams box shows a won/tie score, since a live page has
    no score there at all. The thread is not built until the Full Match Stats
    table and every finished map's stats tab are on the page. Those can trail
-   `Match over` by a minute, and they make up most of the body. After five
-   minutes the thread is built without them, because a forfeit never gets any.
+   `Match over` by a minute, and they make up most of the body. After one
+   minute the thread is built without them, because a forfeit never gets any.
 3. **Build.** The content script in that same tab runs the normal Post-Match
    pipeline (the same fetches, cache and checks as clicking the button) and hands
    the title and body to the worker. This is a separate tab from the shared
@@ -512,7 +512,9 @@ It works like every other lookup here, in a real tab rather than a fetch
    worker rather than put in the URL. `reddit.js` applies the
    `Discussion | Esports` flair first, then reads it back from the form's
    preview, and only then fills in the body and clicks **submit**. Once reddit
-   lands on `/comments/…`, the job is marked posted and the watch tab closes.
+   lands on `/comments/…`, the job is marked posted. An automatically submitted
+   PMT then retains a pending final statistics check, whether or not its initial
+   statistics looked complete.
 
    Old reddit is also served from **www.reddit.com**, and a tab opened on
    old.reddit.com can end up there, so `reddit.js` runs on both hosts. It decides
@@ -523,6 +525,34 @@ It works like every other lookup here, in a real tab rather than a fetch
    www page it never ran, and the job just sat in *posting*. Now, if the submit
    page hasn't asked for its thread within 2 minutes, the job stops as
    *needs you* and the message says where the tab actually ended up.
+
+### Final PMT statistics verification (2.7.5)
+
+An existing HLTV statistics table can still contain provisional values, such as
+regulation-only numbers for an overtime map. Every automatically submitted PMT
+therefore persists `verifyAt = postedAt + 10 minutes`. A PMT with missing
+statistics first uses the existing one-minute recovery checks; an early repair
+transitions to `verify` without changing that original due time. Recovery at or
+after the due time is combined with verification. The existing sixty-minute
+deadline bounds missing-statistics monitoring and automatic retries.
+
+`sourceCheckAt` respects each update's due time. The ten-minute wait does not
+load HLTV repeatedly or occupy the shared queue. When due, a fresh match visit
+feeds the usual complete generation pipeline. A `verify` build always proceeds
+to the original Reddit thread, even when its body equals the saved local body.
+The old-Reddit form supplies the current Markdown: equality finishes without
+Save, a changed generated body is saved only if the current text still equals
+the last confirmed body, and server read-back confirms a save before finishing.
+The result distinguishes an unchanged body from an actual update in the log.
+
+After verification and any remaining LMT handoff, the workflow closes its
+watcher and the Reddit tabs it created, provided they still display the same
+match/thread. User-opened Reddit tabs borrowed for editing are kept. Monitoring
+expiry releases an idle watcher too. Generation and edit failures retain the
+existing retry limits; explicit Retry resumes verification instead of reposting.
+An early missing-statistics retry remains a repair and preserves the original
+ten-minute final check; retrying verification cannot move that check earlier.
+Manual submissions and archived jobs are not automatically adopted.
 
 **Idle tabs wait in one tab group.** While a match is being watched, its tab
 sits in a collapsed purple group titled `PMT scheduled`. A few matches being

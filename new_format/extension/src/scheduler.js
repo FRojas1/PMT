@@ -10,6 +10,7 @@ var SCHEDULE_DEFAULTS = { subreddit: 'GlobalOffensive', flair: 'Discussion | Esp
                           checkMinutes: 1, autoSubmit: true };
 var STATS_GRACE_MS = 60000;
 var STATS_UPDATE_WINDOW_MS = 60 * 60000;
+var FINAL_STATS_DELAY_MS = 10 * 60000;
 var UPDATE_CHECK_MS = 60000;
 var EDIT_TIMEOUT_MS = 3 * 60000;
 var MAX_EDIT_ATTEMPTS = 3;
@@ -76,6 +77,19 @@ function needsSource(job) {
       t.update.status === 'waiting' &&
       (t.kind === 'post' || (!job.overSince && !job.liveUpdatesStopped)));
   });
+}
+// A PMT's final refresh is idle work until its persisted due time. In
+// particular, it must not reload HLTV every minute or hold the shared queue.
+function sourceCheckAt(job) {
+  var at = Infinity;
+  threads(job).forEach(function (t) {
+    if (t.state === 'watching') at = Math.min(at, job.nextCheckAt || 0);
+    else if (t.state === 'posted' && t.update && t.update.status === 'waiting' &&
+        (t.kind === 'post' || (!job.overSince && !job.liveUpdatesStopped))) {
+      at = Math.min(at, Math.max(job.nextCheckAt || 0, t.update.nextAt || 0));
+    }
+  });
+  return at;
 }
 function hasWork(job) {
   return !job.cancelled && (needsSource(job) || threads(job).some(function (t) {
@@ -677,12 +691,55 @@ function phaseOf(s) {
 /* -------------------------------------------------------- shared watcher */
 
 function releaseWatchTab(id) {
-  var previous;
+  var previous, finished;
   return updateJob(id, function (job) {
-    if (needsSource(job)) return;
+    if (needsSource(job) || threads(job).some(editing)) return;
     previous = { watchTabId: job.watchTabId, matchId: job.matchId };
     job.watchTabId = null;
-  }).then(function () { if (previous) return closeWatchTab(previous); });
+    var post = job.threads.post;
+    if (!hasWork(job) && !job.cancelled && post && post.verifiedAt) finished = job;
+  }).then(function () {
+    return previous && closeWatchTab(previous);
+  }).then(function () {
+    if (finished) return closeFinishedRedditTabs(finished);
+  });
+}
+// Only close tabs created by the workflow, still showing their own thread.
+// An independently opened Reddit tab borrowed for editing belongs to the user.
+function closeFinishedRedditTabs(job) {
+  return threads(job).reduce(function (pending, t) {
+    var ids = [t.submitTabId];
+    if (t.update && t.update.owned) ids.push(t.update.tabId);
+    return pending.then(function () {
+      return ids.reduce(function (closed, id) {
+        return closed.then(function () { return getTab(id); }).then(function (tab) {
+          var target = validRedditThread(job, t);
+          var page = tab && validRedditThread(job, { threadUrl: tab.url });
+          if (target && page && target.fullname === page.fullname) {
+            return tabEditP(function (cb) { chrome.tabs.remove(tab.id, cb); });
+          }
+        });
+      }, Promise.resolve());
+    });
+  }, Promise.resolve());
+}
+// A missing-statistics repair before ten minutes must still be followed by
+// the final refresh. Keep the original posting-based due time and deadline.
+function completeUpdate(job, t) {
+  var u = t.update, now = Date.now();
+  u.status = u.purpose === 'maps' && !job.overSince ? 'waiting' : 'done';
+  u.nextAt = u.status === 'waiting' ? now + UPDATE_CHECK_MS : null;
+  u.attempts = 0; u.buildErrors = 0; u.error = null;
+  if (u.purpose === 'final') t.finalState = 'done';
+  if (t.kind !== 'post') return;
+  t.needsStats = false;
+  if (u.purpose === 'verify') t.verifiedAt = now;
+  else if (t.verifyAt && !t.verifiedAt) {
+    u.purpose = 'verify'; u.status = 'waiting';
+    u.nextAt = Math.max(now, t.verifyAt);
+    job.nextCheckAt = u.nextAt;
+    threadNote(job, t, 'waiting for the final statistics check', { at: t.verifyAt });
+  }
 }
 function stopUpdate(job, t, reason, permanent) {
   if (!t.update) return;
@@ -786,7 +843,8 @@ function checkMatch(job, settings) {
           }
           if (!intent && post && post.state === 'posted' && post.update &&
               post.update.status === 'waiting' && now >= (post.update.nextAt || 0) && s.statsReady) {
-            intent = { kind: 'post', purpose: 'stats' };
+            intent = { kind: 'post', purpose: post.update.purpose === 'verify' ||
+              (post.verifyAt && now >= post.verifyAt) ? 'verify' : 'stats' };
           }
           return;
         }
@@ -908,16 +966,17 @@ function threadBuilt(msg, sender) {
       t.state = 'submitting'; t.submitOpenedAt = null; t.submitPageSeenAt = null;
       t.submitOpenFailures = 0; t.reopenSubmitAt = Date.now();
       threadNote(job, t, 'thread built; queued for Reddit', { title: t.title });
-    } else if (msg.body === t.body) {
+    } else if (msg.body === t.body && build.purpose !== 'verify') {
       t.publishedSignature = build.signature;
-      t.update.status = build.purpose === 'maps' ? 'waiting' : 'done';
-      t.update.nextAt = Date.now() + UPDATE_CHECK_MS;
-      if (build.purpose === 'final') t.finalState = 'done';
+      completeUpdate(job, t);
       threadNote(job, t, 'generated body is already current');
     } else {
+      // Verification always reads Reddit's current Markdown, even when the
+      // regenerated body equals our saved copy. reddit.js skips Save if equal.
       t.update.status = 'editing'; t.update.body = msg.body; t.update.attempts = 0;
       t.update.signature = build.signature; t.update.nextAt = Date.now();
-      threadNote(job, t, 'content ready; queued for Reddit edit');
+      threadNote(job, t, build.purpose === 'verify' ?
+        'content ready; queued for final Reddit comparison' : 'content ready; queued for Reddit edit');
     }
   }).then(function () {
     if (!result) return;
@@ -1021,10 +1080,13 @@ function submitLanded(msg, sender) {
       t.update = { purpose: 'maps', status: job.overSince ? 'done' : 'waiting',
         nextAt: Date.now() + UPDATE_CHECK_MS, deadline: job.monitorDeadline };
       job.nextCheckAt = Math.min(job.nextCheckAt || Infinity, Date.now() + UPDATE_CHECK_MS);
-    } else if (!job.cancelled && t.kind === 'post' && t.needsStats) {
-      t.update = { purpose: 'stats', status: 'waiting', nextAt: Date.now() + UPDATE_CHECK_MS,
-        deadline: Date.now() + STATS_UPDATE_WINDOW_MS };
-      job.nextCheckAt = Date.now() + UPDATE_CHECK_MS;
+    } else if (!job.cancelled && t.kind === 'post' && t.submitClickedAt) {
+      t.verifyAt = t.postedAt + FINAL_STATS_DELAY_MS;
+      t.update = { purpose: t.needsStats ? 'stats' : 'verify', status: 'waiting',
+        nextAt: t.needsStats ? t.postedAt + UPDATE_CHECK_MS : t.verifyAt,
+        deadline: t.postedAt + STATS_UPDATE_WINDOW_MS };
+      job.nextCheckAt = t.update.nextAt;
+      threadNote(job, t, 'final statistics check scheduled', { at: t.verifyAt });
     }
     notify(job, t.kind === 'live' ? 'Live discussion posted' : 'Post-match thread posted', t.title || job.label);
     return found;
@@ -1048,7 +1110,8 @@ function startEdit(threadId) {
     u.attempts = (u.attempts || 0) + 1; u.nextAt = null; u.startedAt = Date.now();
     u.editToken = requestId(); u.legacy = false; u.tabId = null; u.owned = false;
     claimed = true;
-    threadNote(job, t, 'opening Reddit to edit', { purpose: u.purpose, attempt: u.attempts });
+    threadNote(job, t, u.purpose === 'verify' ? 'opening Reddit for final statistics comparison' :
+      'opening Reddit to edit', { purpose: u.purpose, attempt: u.attempts });
   }).then(function (found) {
     if (!claimed || !found) return;
     var job = found.job, t = found.thread, target = validRedditThread(job, t), token = t.update.editToken;
@@ -1132,12 +1195,12 @@ function editResult(msg, sender) {
     if (!msg.ok) return;
     t.body = u.body; u.body = null;
     t.publishedSignature = u.signature || t.publishedSignature || '';
-    u.status = u.purpose === 'maps' && !job.overSince ? 'waiting' : 'done';
-    u.nextAt = u.status === 'waiting' ? Date.now() + UPDATE_CHECK_MS : null;
-    u.attempts = 0; u.buildErrors = 0; u.error = null;
-    if (u.purpose === 'final') t.finalState = 'done';
-    threadNote(job, t, u.purpose === 'final' ? 'finalized with the post-match discussion link' : 'Reddit thread updated');
-    notify(job, u.purpose === 'final' ? 'Live discussion finalized' : 'Match thread updated', t.title || job.label);
+    var purpose = u.purpose;
+    completeUpdate(job, t);
+    threadNote(job, t, purpose === 'verify' ? 'final statistics check complete; ' +
+      (msg.unchanged ? 'Reddit body already current' : 'Reddit thread updated') :
+      purpose === 'final' ? 'finalized with the post-match discussion link' : 'Reddit thread updated');
+    if (!msg.unchanged) notify(job, purpose === 'final' ? 'Live discussion finalized' : 'Match thread updated', t.title || job.label);
   }).then(function (found) {
     if (!accepted || !found) return;
     if (!msg.ok) return editFailed(msg.jobId, msg.editToken, msg.error || 'Reddit edit failed', !!msg.permanent);
@@ -1193,7 +1256,7 @@ function finalBuildAt(job) {
 }
 function nextWorkAt(job) {
   if (!hasWork(job)) return Infinity;
-  var at = needsSource(job) ? job.nextCheckAt || 0 : Infinity;
+  var at = sourceCheckAt(job);
   at = Math.min(at, finalBuildAt(job));
   threads(job).forEach(function (t) {
     if (t.state === 'submitting' && t.reopenSubmitAt) at = Math.min(at, t.reopenSubmitAt);
@@ -1241,7 +1304,7 @@ function tickJob(id, settings, monitorOnly) {
     if (finalBuildAt(job) <= now) {
       return startBuild(id, 'live', 'final', false);
     }
-    var sourceDue = needsSource(job) && now >= (job.nextCheckAt || 0);
+    var sourceDue = needsSource(job) && now >= sourceCheckAt(job);
     if (sourceDue && post && post.state === 'watching' && job.overSince) return checkMatch(job, settings);
     if (submitDue(live)) return monitorSubmission(job, live);
     if (editDue(live)) return startEdit(live.id);
@@ -1259,7 +1322,8 @@ function runSchedulerTick() {
       jobList(jobs).forEach(function (job) {
         var hadBuild = !!job.build;
         expireWork(job);
-        if (hadBuild && !job.build) {
+        if (job.watchTabId != null && ((hadBuild && !job.build) ||
+            (!needsSource(job) && !threads(job).some(editing)))) {
           abandoned.push({ watchTabId: job.watchTabId, matchId: job.matchId });
           job.watchTabId = null;
         }
@@ -1412,11 +1476,16 @@ function retryUpdate(id, kind) {
   return updateJob(id, function (job) {
     var t = job.threads[kind];
     if (!t || t.state !== 'posted' || editing(t) || (job.build && job.build.kind === kind)) return;
-    var purpose = kind === 'post' ? 'stats' : job.threads.post.state === 'posted' ? 'final' : 'maps';
+    var now = Date.now();
+    // An early retry repairs missing statistics without consuming the final check.
+    var purpose = kind === 'post' ?
+      t.verifyAt && (!t.needsStats || now >= t.verifyAt) ? 'verify' : 'stats' :
+      job.threads.post.state === 'posted' ? 'final' : 'maps';
     if (kind === 'live') { job.liveUpdatesStopped = false; t.finalState = null; }
-    t.update = { purpose: purpose, status: 'waiting', nextAt: Date.now(),
-      deadline: Date.now() + (purpose === 'maps' ? LIVE_MAX_MONITOR_MS : STATS_UPDATE_WINDOW_MS) };
-    job.nextCheckAt = Date.now();
+    t.update = { purpose: purpose, status: 'waiting',
+      nextAt: purpose === 'verify' ? Math.max(now, t.verifyAt) : now,
+      deadline: now + (purpose === 'maps' ? LIVE_MAX_MONITOR_MS : STATS_UPDATE_WINDOW_MS) };
+    job.nextCheckAt = t.update.nextAt;
     threadNote(job, t, 'retrying ' + purpose + ' updates');
   }).then(function () { tick(); return { ok: true }; });
 }

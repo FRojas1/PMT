@@ -173,7 +173,8 @@ function jobReport(job) {
     '# threads ' + JSON.stringify(job.threads && Object.keys(job.threads).map(function (kind) {
       var t = job.threads[kind];
       return { kind: kind, id: t.id, state: t.state, url: t.threadUrl,
-        submitClickedAt: t.submitClickedAt, finalState: t.finalState, update: t.update && {
+        submitClickedAt: t.submitClickedAt, finalState: t.finalState,
+        verifyAt: t.verifyAt, verifiedAt: t.verifiedAt, update: t.update && {
           purpose: t.update.purpose, status: t.update.status, attempts: t.update.attempts, error: t.update.error } };
     })),
     ''].concat(jobLogText(job)).join('\n');
@@ -221,7 +222,13 @@ function renderThread(job, thread, box) {
     summary += thread.finalState === 'done' ? ' · finalized' : job.liveUpdatesStopped ? ' · updates stopped'
       : job.overSince ? ' · PMT handoff pending' : ' · monitoring maps';
   }
-  if (thread.update) summary += ' · ' + thread.update.purpose + ' updates: ' + thread.update.status;
+  if (thread.update) {
+    summary += thread.update.purpose === 'verify' ? ' · final stats check: ' + thread.update.status :
+      ' · ' + thread.update.purpose + ' updates: ' + thread.update.status;
+    if (thread.update.purpose === 'verify' && thread.update.status === 'waiting') {
+      summary += ' (' + when(thread.update.nextAt) + ')';
+    }
+  }
   line.textContent = summary;
   box.appendChild(line);
   if (thread.threadUrl) {

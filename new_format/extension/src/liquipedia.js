@@ -27,6 +27,7 @@ function normalizeTeamName(name) {
     nip: 'ninjasinpyjamas',
     '1w': '1win',
     lag: "life's a game",
+    betclic: 'betclicapogee',
   };
 
   return aliases[normalized] || normalized;
