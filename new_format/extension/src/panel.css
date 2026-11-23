@@ -41,12 +41,12 @@
 .pmt-panel {
   position: fixed;
   right: 18px;
-  bottom: 162px;   /* clear of the three launch buttons */
+  bottom: 216px;   /* clear of the four launch buttons */
   z-index: 2147483000;
   display: none;
   width: 620px;
   max-width: calc(100vw - 36px);
-  max-height: calc(100vh - 180px);
+  max-height: calc(100vh - 234px);
   flex-direction: column;
   gap: 6px;
   padding: 12px;

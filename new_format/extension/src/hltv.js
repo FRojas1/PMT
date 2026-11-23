@@ -108,7 +108,7 @@ function flagLink(code) {
 }
 
 function titleCase(s) {
-  return String(s || '').replace(/[A-Za-z][A-Za-z']*/g, function (w) {
+  return String(s || '').replace(/[A-Za-z][A-Za-z']*\b/g, function (w) {
     // leave acronyms and single letters ("EU", "B") alone
     if (w.length > 1 && w === w.toUpperCase()) return w;
     return w.charAt(0).toUpperCase() + w.slice(1);
@@ -212,8 +212,7 @@ function scrapeFormatBox(doc) {
 }
 
 function scrapeVeto(doc, teams) {
-  var boxes = doc.querySelectorAll('.veto-box .padding');
-  var listBox = boxes[boxes.length - 1];
+  var listBox = doc.querySelector('.veto-box.real-veto-only > .padding');
   if (!listBox || listBox.classList.contains('preformatted-text')) return [];
   var rows = [];
   Array.prototype.forEach.call(listBox.querySelectorAll('div'), function (div) {
@@ -235,7 +234,8 @@ function scrapeVeto(doc, teams) {
 
 function scrapeMaps(doc) {
   var maps = [];
-  Array.prototype.forEach.call(doc.querySelectorAll('.mapholder'), function (holder) {
+  var matchOver = /match over/i.test(txt(doc.querySelector('.timeAndEvent .countdown')));
+  Array.prototype.forEach.call(doc.querySelectorAll('.maps .real-veto-only .mapholder'), function (holder) {
     var name = txt(holder.querySelector('.mapname'));
     if (!name) return;
     var played = !!holder.querySelector('.results.played');
@@ -246,6 +246,9 @@ function scrapeMaps(doc) {
     var mapstatsId = (statsUrl.match(/\/mapstatsid\/(\d+)\//) || [])[1] || '';
     var left = holder.querySelector('.results-left .results-team-score');
     var right = holder.querySelector('.results-right .results-team-score');
+    var score = [parseInt(txt(left), 10), parseInt(txt(right), 10)];
+    var high = Math.max(score[0], score[1]);
+    var low = Math.min(score[0], score[1]);
 
     // Half scores come as parenthesised groups: "(5:7; 7:5)" for regulation,
     // where each number carries a ct/t class, then one more "(1:4)" group per
@@ -272,12 +275,17 @@ function scrapeMaps(doc) {
       ot[0] += g[0] ? g[0].rounds : 0;
       ot[1] += g[1] ? g[1].rounds : 0;
     });
-    // HLTV puts `.results.played` on a revealed map even before it starts
-    // (scores are "-"); won/lost is what means the map is actually over.
-    // `.results.optional` is a leftover that has not been reached yet.
+    // `.played` also appears before a map starts, and won/lost can describe
+    // the leader at halftime. While the match is on, require a winning CS2
+    // score: 13 in regulation, or 16/19/22/... after MR3 overtime. A two-round
+    // lead alone is not enough (15-13 is still live). Keep this rule in sync
+    // with readMatchState in scheduler.js. Once HLTV says Match over, retain
+    // nonstandard results such as forfeits and historical MR15 scores too.
+    var finalScore = (high === 13 && low <= 11) ||
+      (high >= 16 && (high - 16) % 3 === 0 && low >= high - 4 && low <= high - 2);
     var decided = !!(holder.querySelector(
       '.results-left.won, .results-left.lost, .results-right.won, .results-right.lost'
-    ));
+    )) && low >= 0 && (matchOver || finalScore);
     var status = 'tba';
     if (!/^tba$/i.test(name) && holder.querySelector('.results')) {
       status = decided ? 'finished' : 'upcoming';
@@ -290,7 +298,7 @@ function scrapeMaps(doc) {
       optional: !!(holder.querySelector('.results.optional')),
       statsUrl: statsUrl,
       mapstatsId: mapstatsId,
-      score: [parseInt(txt(left), 10) || 0, parseInt(txt(right), 10) || 0],
+      score: [score[0] || 0, score[1] || 0],
       halves: groups[0] || [],
       ot: ot,
       hasOt: groups.length > 1
@@ -740,6 +748,7 @@ function scrapeMatch(doc, url) {
   var live = scrapeLive(doc);
   var maps = markLiveMap(scrapeMaps(doc), live);
   var eventA = doc.querySelector('.timeAndEvent .event a');
+  var matchTimeEl = doc.querySelector('.timeAndEvent .date[data-unix], .timeAndEvent .time[data-unix]');
   var matchUrl = String(url || '').split('#')[0].split('?')[0];
   var statsByMap = {};
   maps.forEach(function (m) {
@@ -748,6 +757,7 @@ function scrapeMatch(doc, url) {
   return {
     matchUrl: matchUrl,
     matchId: (matchUrl.match(/\/matches\/(\d+)\//) || [])[1] || '',
+    matchTime: parseInt((matchTimeEl && matchTimeEl.getAttribute('data-unix')) || '0', 10) || live.unix,
     event: {
       name: (eventA && eventA.getAttribute('title')) || txt(eventA),
       url: eventA ? new URL(eventA.getAttribute('href'), 'https://www.hltv.org').toString() : ''

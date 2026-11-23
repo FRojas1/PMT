@@ -16,10 +16,12 @@
 
 var ROLE_IGL = '♛';   // ♛
 var ROLE_AWP = '⊕';   // ⊕
-var FOOTER =
-  '[**This thread was created by the Post-Match Team.**]' +
-  '(https://docs.google.com/spreadsheets/d/1k5TiV7VuDKLa41MfcDgP1XiBkPvAo_HInRmNlKKEIBM/edit?usp=sharing)  \n' +
-  'Want to help post these threads? Message /u/Undercover-Cactus to join the Post-Match Team.   ';
+var FOOTER =           // Footer for the Post-Match Thread - Provides PMT links and encourages new members to join
+  '**This thread was created by the Post-Match Team.**  \n' +
+  '[**PMT Discord**](https://discord.gg/X6Pn2jbmJc) | ' + // PMT Discord invite link
+  '[**PMT Creator**](https://postmatchteam.uk) | ' + // Could eventually be replaced by a link to download the extension once that is publicly and easily available - though it's possible we may also want to keep the extension more private
+  '[**PMT Archive**](https://docs.google.com/spreadsheets/d/1k5TiV7VuDKLa41MfcDgP1XiBkPvAo_HInRmNlKKEIBM/edit?usp=sharing)  \n' + // Archive of previous match threads. Once password protection is added to main schedule, that should also be linked
+  'The PMT is always looking for help! If you\'d want to help contribute, message u/Undercover-Cactus on Reddit, or join the Discord (encouraged but not required).  ';
 
 var ROLE_SYMBOL = { igl: ROLE_IGL, awp: ROLE_AWP };
 
@@ -332,15 +334,16 @@ function liveHeaderBlock(d, ctx) {
     ctx.teamTag(1) + ' ' + ctx.lpName(1) + '  ',
     ''
   ];
-  var allTba = d.maps.length && d.maps.every(function (m) {
-    return m.status === 'tba' || /^tba$/i.test(m.name);
+  // HLTV sometimes includes extra TBA map placeholders alongside the
+  // revealed map list. Once any real maps are known, omit those placeholders.
+  var namedMaps = (d.maps || []).filter(function (m) {
+    return m && m.name && !/^(?:tba|tbd)$/i.test(m.name.trim());
   });
-  if (allTba) {
+  if (!namedMaps.length) {
     lines.push('**Maps:** TBA  ');
   } else {
-    d.maps.forEach(function (m) {
-      if (m.status === 'tba' || /^tba$/i.test(m.name)) lines.push('**TBA**  ');
-      else if (m.status === 'finished') {
+    namedMaps.forEach(function (m) {
+      if (m.status === 'finished') {
         lines.push('**' + m.name + ':** ' + m.score[0] + '-' + m.score[1] + '  ');
       } else if (m.status === 'live') {
         lines.push('**' + m.name + ':** LIVE  ');
