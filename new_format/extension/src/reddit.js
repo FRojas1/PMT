@@ -79,9 +79,10 @@
           return new Promise(function (resolve) { releaseLock = resolve; });
         }).catch(function () {});
       }
-      var report = function (ok, error, permanent) {
+      var report = function (ok, error, permanent, unchanged) {
         return ask({ type: 'scheduledMap3EditResult', jobId: job.jobId,
-                     ok: ok, error: error || '', permanent: !!permanent });
+                     editToken: job.editToken,
+                     ok: ok, error: error || '', permanent: !!permanent, unchanged: !!unchanged });
       };
       var normText = function (s) {return String(s || '').replace(/\r\n/g, '\n').replace(/[ \t\\\n]+$/, '');};
       var verifyKey = 'pmt:edit-verify:' + job.jobId;
@@ -226,7 +227,7 @@
       function editForm(post, f) {
         var current = normText(f.text.value);
         if (current === normText(job.newBody) && normText(f.text.textContent) === normText(job.newBody)) {
-          return { ok: true }; // already saved in the page's server-supplied Markdown
+          return { ok: true, unchanged: !readVerification() }; // server-supplied Markdown
         }
         if (current !== normText(job.originalBody)) {
           return { ok: false, permanent: true, error: 'Reddit body was manually changed; refusing to overwrite' };
@@ -261,7 +262,7 @@
       }).then(function (r) {
         if (r.reloading) return; // the next page load performs the read-back
         clearVerification();
-        return report(!!r.ok, r.error, r.permanent);
+        return report(!!r.ok, r.error, r.permanent, r.unchanged);
       }).then(function () { unlock(); }, function () { unlock(); });
     });
   }
