@@ -30,7 +30,7 @@ var TEAM_LOGO_FLAIRS = {
   "natus vincere": "navi",   // Natus Vincere  [alias]
   "g2": "g2",
   "faze": "faze",
-  "betboom": "betboom",
+  "betboom": "bb",
   "aurora": "aurora",
   "big": "big",
   "the mongolz": "mongolz",   // The MongolZ  [no-article]
@@ -72,6 +72,10 @@ var TEAM_LOGO_FLAIRS = {
   "red canids": "redcanids",
   "chinggis warriors": "chinggis",   // Chinggis Warriors  [first-word]
   "rare atom": "rareatom",
+  "parivision": "pvision",
+  "bc.game": "gosh",
+  "dendele": "dendele",
+  "1win": "theone",
 };
 
 // The flair slug for a team, or null when the subreddit has no logo for it.
