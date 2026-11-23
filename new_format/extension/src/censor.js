@@ -7,9 +7,9 @@
  * bookmaker's - 1win, SportsBetExpert). So does the odd event (Stake Ranked).
  *
  * The replacements are what these teams are already called wherever betting
- * brands are not allowed: the Esports World Cup runs PVISION and BB Team,
- * Liquipedia itself lists 1win as "1w Team" and BET-M 33 as "33", and
- * SportsBetExpert is SBE to everyone. Checked by hand against the Valve
+ * brands are not allowed: the Esports World Cup runs PVISION and BB Team, the
+ * Major runs BC.Game as GOSH and 1win as The One, Liquipedia lists BET-M 33 as
+ * "33", and SportsBetExpert is SBE to everyone. Checked by hand against the Valve
  * ranking's top 150 (the 25 August and 2 October 2026 snapshots): those seven
  * are the only gambling-branded teams in it.
  *
@@ -22,8 +22,10 @@
  *     right page - so a branded slug is rewritten by the same rules.
  *   - Liquipedia addresses a page by its name, so a branded link is replaced by
  *     the page's id (index.php?curid=<id>), which opens the same article.
- *   - A subreddit flair anchor carrying the brand (#betboom-logo) is not used;
- *     the team gets its country flag, like any team without a flair.
+ *   - A subreddit flair anchor carrying the brand (#betboom-logo) is never
+ *     used. The subreddit's unbranded ones (#bb-logo, #pvision-logo,
+ *     #gosh-logo, #theone-logo) are, through teams.js; a team with neither
+ *     gets its country flag, like any team without a flair.
  *
  * Whatever slips past is caught at the end: the finished title and body are
  * scanned (gamblingTermsIn) and anything found is named in the run log and the
@@ -36,13 +38,14 @@
 var GAMBLING_NAME_RULES = [
   [/\bBetclic\s+Apogee\b/gi, 'Apogee'],        // Liquipedia "Betclic Apogee Esports" -> Apogee Esports
   [/\bBetclic\b/gi, 'Apogee'],                 // HLTV "Betclic"
-  [/\bBC\s?\.?\s?Game\b/gi, 'GOSH'],            // "BC.Game Esports" -> GOSH (as used at major); slug "bcgame"
+  [/\bBC\s?\.?\s?Game\b/gi, 'GOSH'],           // "BC.Game Esports" -> GOSH Esports (as at the Major); slug "bcgame"
   [/\bBET[-\s]?M\s+33\b/gi, '33'],             // Liquipedia's old "BET-M 33"
   [/\bBET[-\s]?M\b/gi, '33'],                  // HLTV "BET-M"
-  [/\bPARIVISION\b/gi, 'VISION'],             // as at the Esports World Cup
+  [/\bPARIVISION\b/gi, 'PVISION'],             // as at the Esports World Cup
   [/\bBetBoom\b/gi, 'BB'],                     // "BetBoom Team" -> BB Team (EWC); HLTV "BETBOOM" -> BB
-  [/\b1win\b/gi, 'The One'],                   // "1win" -> "The One" (as used at major)
-  //   [/\bSportsBetExpert\b/gi, 'SBE'],
+  [/\b1w(?:\s+Team)?\b/gi, 'The One'],         // Liquipedia "1w Team" -> The One, to match the HLTV name below
+  [/\b1win\b/gi, 'The One'],                   // "1win" -> The One (as at the Major)
+  [/\bSportsBetExpert\b/gi, 'SBE'],
   // event sponsors
   [/\bStake\s+Ranked\b/gi, 'StarLadder Ranked'],   // StarLadder's series, billed "StarLadder Stake Ranked"
   [/\bStake\s+Pulse\b/gi, 'BME Pulse'],            // Black Molly Entertainment's Stake Pulse Beat series

@@ -688,26 +688,18 @@
   }
 
 
+  // Replies to the thread are kept out of the poster's inbox. A nicety, not a
+  // condition: if reddit's form has no such box, or it will not untick, the
+  // thread still goes up and the job log says which.
   function disableInboxReplies(form) {
-    const checkbox = form.querySelector(
-      'input[type="checkbox"][name="sendreplies"]'
-    );
-
-    if (!checkbox) return false;
-
-    if (checkbox.checked) checkbox.click();
-
-    return !checkbox.checked;
+    var box = form.querySelector('input[type="checkbox"][name="sendreplies"]');
+    if (!box) return 'no box on the form';
+    if (box.checked) box.click();
+    return box.checked ? 'still ticked' : 'off';
   }
-
 
   function fillAndSubmit(f, job) {
-    if (!disableInboxReplies(f.form)) {
-    return stop(
-      'reply-setting',
-      'Could not disable inbox replies'
-    );
-  }
+    trace('inbox replies: ' + disableInboxReplies(f.form));
     fill(f.title, job.title);
     fill(f.text, job.body);
     if (f.title.value !== job.title || f.text.value !== job.body) {
