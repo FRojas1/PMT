@@ -4,7 +4,8 @@
  *
  * GENERATED - do not hand-edit. Regenerate with:
  *     node tools/build-teams.js
- * after refreshing the subreddit stylesheet or the ranking snapshot. Built by
+ * after refreshing the subreddit stylesheet or the ranking snapshot. Hand-kept
+ * entries (TEAM_LOGO_MANUAL) live in MANUAL in that script. Built by
  * pairing each flair class with its anchor in the subreddit stylesheet (e.g.
  * `.flair-fan.flair-liquid, a[href$="#tl-logo"]`) and matching those flair
  * classes against the Valve ranking's top 200 team names.
@@ -72,19 +73,32 @@ var TEAM_LOGO_FLAIRS = {
   "red canids": "redcanids",
   "chinggis warriors": "chinggis",   // Chinggis Warriors  [first-word]
   "rare atom": "rareatom",
-  "vision": "paravision",
-  "dendele": "dendele",
-  "the one": "theone",
+};
+
+// Hand-kept (MANUAL in tools/build-teams.js), checked before the table above:
+// teams censor.js renames, keyed on both their real and their thread names,
+// and logo anchors added to the subreddit after the stylesheet snapshot.
+var TEAM_LOGO_MANUAL = {
+  "parivision": "pvision",
+  "pvision": "pvision",
+  "betboom": "bb",
+  "bb": "bb",
+  "bc.game": "gosh",
+  "bc game": "gosh",
   "gosh": "gosh",
-  "bb": "bb"
+  "1win": "theone",
+  "1w": "theone",
+  "the one": "theone",
+  "dendele": "dendele",
 };
 
 // The flair slug for a team, or null when the subreddit has no logo for it.
 function teamFlairSlug(name, overrides) {
   var key = String(name || '').trim().toLowerCase();
-  return (overrides && overrides[key]) || TEAM_LOGO_FLAIRS[key] || null;
+  return (overrides && overrides[key]) || TEAM_LOGO_MANUAL[key] || TEAM_LOGO_FLAIRS[key] || null;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { TEAM_LOGO_FLAIRS: TEAM_LOGO_FLAIRS, teamFlairSlug: teamFlairSlug };
+  module.exports = { TEAM_LOGO_FLAIRS: TEAM_LOGO_FLAIRS, TEAM_LOGO_MANUAL: TEAM_LOGO_MANUAL,
+                     teamFlairSlug: teamFlairSlug };
 }

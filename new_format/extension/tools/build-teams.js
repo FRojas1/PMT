@@ -33,6 +33,29 @@ const ALIAS = {
   'mouz nxt': 'msports',
 };
 
+// Hand-kept and emitted as-is into a second table that the lookup checks first,
+// so it also overrides a generated entry ("betboom" -> "betboom" would be
+// refused as a gambling anchor). Two cases the generator cannot work out:
+//   - Teams censor.js renames. The match's own two teams reach the lookup
+//     already renamed (PVISION, BB Team, GOSH, The One) while next-round
+//     opponents reach it under their real names, so each logo is keyed on both.
+//   - Anchors the subreddit added or renamed after the stylesheet snapshot
+//     above: #pvision-logo (was #paravision-logo), #bb-logo (was
+//     #betboom-logo), #gosh-logo, #theone-logo, #dendele-logo - November 2026.
+const MANUAL = [
+  ['parivision', 'pvision'],
+  ['pvision', 'pvision'],
+  ['betboom', 'bb'],
+  ['bb', 'bb'],
+  ['bc.game', 'gosh'],
+  ['bc game', 'gosh'],
+  ['gosh', 'gosh'],
+  ['1win', 'theone'],
+  ['1w', 'theone'],
+  ['the one', 'theone'],
+  ['dendele', 'dendele'],
+];
+
 // A first-word match onto the parent org is wrong for these sub-teams; the
 // subreddit either has a dedicated flair (which `exact` already finds) or none.
 const VARIANT = /\b(academy|junior|juniors|jr|nxt|youngsters|young|prospects|fe|female|women|womens|w|b|ii|2|force|ares|reload|talent|rising)\b/i;
@@ -95,6 +118,9 @@ const lines = matched.map((r) =>
   "  " + JSON.stringify(r.name.toLowerCase()) + ": " + JSON.stringify(r.slug) + "," +
   (r.why === 'exact' ? '' : '   // ' + r.name + '  [' + r.why + ']'));
 
+const manualLines = MANUAL.map(([name, slug]) =>
+  "  " + JSON.stringify(name) + ": " + JSON.stringify(slug) + ",");
+
 const heuristic = matched.filter((r) => r.why !== 'exact').length;
 const out = `/*
  * HLTV team name -> r/GlobalOffensive logo-flair slug. Pure data plus a lookup;
@@ -102,7 +128,8 @@ const out = `/*
  *
  * GENERATED - do not hand-edit. Regenerate with:
  *     node tools/build-teams.js
- * after refreshing the subreddit stylesheet or the ranking snapshot. Built by
+ * after refreshing the subreddit stylesheet or the ranking snapshot. Hand-kept
+ * entries (TEAM_LOGO_MANUAL) live in MANUAL in that script. Built by
  * pairing each flair class with its anchor in the subreddit stylesheet (e.g.
  * \`.flair-fan.flair-liquid, a[href$="#tl-logo"]\`) and matching those flair
  * classes against the Valve ranking's top 200 team names.
@@ -120,14 +147,22 @@ var TEAM_LOGO_FLAIRS = {
 ${lines.join('\n')}
 };
 
+// Hand-kept (MANUAL in tools/build-teams.js), checked before the table above:
+// teams censor.js renames, keyed on both their real and their thread names,
+// and logo anchors added to the subreddit after the stylesheet snapshot.
+var TEAM_LOGO_MANUAL = {
+${manualLines.join('\n')}
+};
+
 // The flair slug for a team, or null when the subreddit has no logo for it.
 function teamFlairSlug(name, overrides) {
   var key = String(name || '').trim().toLowerCase();
-  return (overrides && overrides[key]) || TEAM_LOGO_FLAIRS[key] || null;
+  return (overrides && overrides[key]) || TEAM_LOGO_MANUAL[key] || TEAM_LOGO_FLAIRS[key] || null;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { TEAM_LOGO_FLAIRS: TEAM_LOGO_FLAIRS, teamFlairSlug: teamFlairSlug };
+  module.exports = { TEAM_LOGO_FLAIRS: TEAM_LOGO_FLAIRS, TEAM_LOGO_MANUAL: TEAM_LOGO_MANUAL,
+                     teamFlairSlug: teamFlairSlug };
 }
 `;
 fs.writeFileSync(__dirname + '/../src/teams.js', out);
